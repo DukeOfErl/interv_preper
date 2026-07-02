@@ -17,22 +17,30 @@ uv run pytest                        # run evals/tests
 uv run pytest path/to/test.py::name  # run a single test
 ```
 
-`OPENROUTER_API_KEY` must be set in the environment before running — the app talks to OpenRouter via the OpenAI SDK (`base_url="https://openrouter.ai/api/v1"`), not to OpenAI directly.
+`OPENROUTER_API_KEY` must be set before running — via a local `.env` file (see `.env.example`, loaded by `config.load_api_key()`) or the environment. The app talks to OpenRouter via the OpenAI SDK (`base_url="https://openrouter.ai/api/v1"`), not to OpenAI directly. If the key is missing, `chat_bot.py` shows an `st.error` and calls `st.stop()` (fail fast).
 
-`main.py` is an unused stub. **`chat_bot.py` is the application.**
+`main.py` is an unused stub. **`chat_bot.py` is the entry point** — a thin Streamlit shell; the logic lives in the `interview_prep/` package.
 
 ## Architecture
 
-**System prompt is composed from markdown files at startup.** `chat_bot.py` reads `PROMPT_FILE_NAMES` and concatenates them (order matters) into `SYSTEM_PROMPT`, which is prepended to every LLM call. To change interviewer behavior, edit the markdown — not the Python.
+`chat_bot.py:main()` wires together the `interview_prep` package and drives the chat loop. Each module has one job:
 
-- `main_system_prompt.md` — role, core behavior, `{context_variable}` placeholders
-- `info_intake.md` — Phase 1 (intake questions)
-- `mock_interview.md` — Phase 2 (conducting the interview)
-- `feedback_stage.md` — Phase 3 (per-answer scoring rubric)
+- `config.py` — constants, paths (`PROMPTS_DIR`, `PROMPT_FILE_NAMES`, `DEFAULT_MODEL`), and `load_api_key()`
+- `prompts.py` — `PromptLibrary` / `PromptFile`: load and compose the markdown prompt
+- `context.py` — token estimation + `get_model_context_window()`; `compute_context_usage()` returns a `ContextUsage`
+- `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens
+- `ui.py` — `render_sidebar()` / `render_history()`
 
-**Model handling.** The model is fixed in `st.session_state["openai_model"]` (default `"GPT-5-Mini"`); there is no UI to switch it. The sidebar shows an estimated context-usage bar: `get_model_context_window()` first queries OpenRouter's `/models` endpoint (cached 1h) and falls back to the static `MODEL_CONTEXT_WINDOWS` dict. Token counts are rough heuristics (`estimate_text_tokens` = chars/4), not real tokenization.
+**System prompt is composed from markdown files at startup.** `PromptLibrary.load()` reads the files named in `config.PROMPT_FILE_NAMES` from `prompts/` and concatenates them (order matters) into `.system_prompt`, prepended to every LLM call. To change interviewer behavior, edit the markdown in `prompts/` — not the Python.
 
-**Streaming.** `response_emulator()` wraps the streamed completion and adds a 0.05s per-token delay for a typewriter effect via `st.write_stream`.
+- `prompts/main_system_prompt.md` — role, core behavior, `{context_variable}` placeholders
+- `prompts/info_intake.md` — Phase 1 (intake questions)
+- `prompts/mock_interview.md` — Phase 2 (conducting the interview)
+- `prompts/feedback_stage.md` — Phase 3 (per-answer scoring rubric)
+
+**Model handling.** The model is fixed in `st.session_state["openai_model"]` (default `config.DEFAULT_MODEL` = `"GPT-5-Mini"`); there is no UI to switch it. The sidebar shows an estimated context-usage bar: `get_model_context_window()` first queries OpenRouter's `/models` endpoint (cached 1h via `st.cache_data`) and falls back to the static `MODEL_CONTEXT_WINDOWS` dict. Token counts are rough heuristics (`estimate_text_tokens` = chars/4), not real tokenization.
+
+**Streaming.** `InterviewLLM.stream_reply()` yields the completion token-by-token with a `TYPING_DELAY_SECONDS` (0.05s) per-token delay for a typewriter effect via `st.write_stream`.
 
 ## Evals
 

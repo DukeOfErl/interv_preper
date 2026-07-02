@@ -2,12 +2,14 @@
 
 A Streamlit chatbot that runs realistic mock job interviews. It gathers context about your target role (from a pasted job ad and resume, or a few intake questions), conducts an interview one question at a time, and scores each answer based on predetermined criteria: relevance, structure, specificity, evidence, judgment, and communication.
 
-The interviewer's behavior is defined entirely in markdown prompt files, which are concatenated into the system prompt at startup:
+The interviewer's behavior is defined entirely in the markdown prompt files under `prompts/`, which are concatenated into the system prompt at startup:
 
-- `main_system_prompt.md` — role and core behavior
-- `info_intake.md` — intake questions (Phase 1)
-- `mock_interview.md` — conducting the interview (Phase 2)
-- `feedback_stage.md` — per-answer scoring rubric (Phase 3)
+- `prompts/main_system_prompt.md` — role and core behavior
+- `prompts/info_intake.md` — intake questions (Phase 1)
+- `prompts/mock_interview.md` — conducting the interview (Phase 2)
+- `prompts/feedback_stage.md` — per-answer scoring rubric (Phase 3)
+
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together.
 
 ## Setup
 
