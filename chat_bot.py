@@ -5,6 +5,10 @@ import os
 import json
 from pathlib import Path
 from urllib import request, error
+from dotenv import load_dotenv
+
+# Load variables from a local .env file (if present) into the environment.
+load_dotenv()
 
 
 MODEL_CONTEXT_WINDOWS = {
@@ -94,6 +98,13 @@ def response_emulator(stream_iter):
 
 # Set OpenRouter API key from environment variable
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    st.error(
+        "OPENROUTER_API_KEY is not set. Add it to a .env file (see .env.example) "
+        "or export it in your environment, then restart the app."
+    )
+    st.stop()
+
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,

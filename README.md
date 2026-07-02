@@ -11,12 +11,14 @@ The interviewer's behavior is defined entirely in markdown prompt files, which a
 
 ## Setup
 
-Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). The app calls [OpenRouter](https://openrouter.ai/) via the OpenAI SDK, so an API key is needed:
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). The app calls [OpenRouter](https://openrouter.ai/) via the OpenAI SDK, so an API key is needed. Copy the template and add your key ([get one here](https://openrouter.ai/keys)):
 
 ```bash
-export OPENROUTER_API_KEY=your_key_here
+cp .env.example .env      # then edit .env and set OPENROUTER_API_KEY
 uv sync
 ```
+
+The `.env` file is gitignored and loaded automatically at startup. Alternatively, export `OPENROUTER_API_KEY` in your shell. In production, use your host's secrets manager rather than a file.
 
 ## Run
 
