@@ -150,3 +150,7 @@ dev = [
     "pytest-rerunfailures==16.4",
     "pytest-xdist==3.8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

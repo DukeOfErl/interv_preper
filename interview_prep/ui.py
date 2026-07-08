@@ -28,6 +28,8 @@ def render_sidebar(library: PromptLibrary, usage: ContextUsage) -> None:
                 f"Estimated used: unknown ({usage.used_tokens:,} tokens so far)"
             )
 
+        st.title("Developer Dashboard")
+
         st.subheader("Prompt Config")
         st.caption("Markdown prompt files used by the chatbot")
         for prompt_file in library.files:
