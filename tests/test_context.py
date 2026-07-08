@@ -7,6 +7,7 @@ from interview_prep.context import (
     estimate_prompt_tokens,
     estimate_text_tokens,
     get_model_context_window,
+    predict_next_call_tokens,
 )
 
 
@@ -35,6 +36,37 @@ def test_estimate_prompt_tokens_counts_overhead_and_content():
     # plus 4 system overhead, 4 per-message overhead, 2 trailer.
     history = [{"role": "user", "content": "abcd"}]
     assert estimate_prompt_tokens("abcd", history) == 1 + 4 + 4 + 1 + 1 + 2
+
+
+# --- next-call prediction ---------------------------------------------------
+
+
+def test_predict_next_call_returns_none_on_empty_chat():
+    # No history to extrapolate from -> caller shows "N/A".
+    assert predict_next_call_tokens("system", []) is None
+
+
+def test_predict_next_call_returns_none_without_an_assistant_reply():
+    # A lone unanswered user prompt is still not a completed exchange.
+    messages = [{"role": "user", "content": "hello"}]
+    assert predict_next_call_tokens("system", messages) is None
+
+
+def test_predict_next_call_uses_average_lengths():
+    # user contents: 40 chars -> 10 tokens, 80 chars -> 20 tokens; avg = 15.
+    # assistant contents: 40 -> 10, 120 -> 30; avg = 20.
+    messages = [
+        {"role": "user", "content": "a" * 40},
+        {"role": "assistant", "content": "b" * 40},
+        {"role": "user", "content": "a" * 80},
+        {"role": "assistant", "content": "b" * 120},
+    ]
+    input_tokens, output_tokens = predict_next_call_tokens("sys", messages)
+
+    # input = current history estimate + 4 (per-message overhead) + avg user (15)
+    expected_input = estimate_prompt_tokens("sys", messages) + 4 + 15
+    assert input_tokens == expected_input
+    assert output_tokens == 20  # avg assistant length
 
 
 # --- model context window ---------------------------------------------------

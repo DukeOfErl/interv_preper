@@ -36,17 +36,15 @@ def fetch_openrouter_models(api_key):
     return payload.get("data", []) if isinstance(payload, dict) else []
 
 
-def get_model_context_window(model_id, api_key):
-    """Return ``(context_window, source)`` for a model id.
+def find_model(models, model_id):
+    """Return the OpenRouter catalog entry matching ``model_id``, or ``None``.
 
-    Prefers a live value from OpenRouter, then falls back to the static
-    ``MODEL_CONTEXT_WINDOWS`` table, then to ``DEFAULT_CONTEXT_WINDOW``.
+    Matches on either ``id`` or ``canonical_slug``, allowing a bare model name
+    (e.g. ``gpt-5-mini``) to match a namespaced id (e.g. ``openai/gpt-5-mini``).
     """
-    models = fetch_openrouter_models(api_key)
     normalized_model_id = str(model_id or "").strip().lower()
-
     if not normalized_model_id:
-        return DEFAULT_CONTEXT_WINDOW, "static_fallback"
+        return None
 
     for model in models:
         if not isinstance(model, dict):
@@ -61,15 +59,27 @@ def get_model_context_window(model_id, api_key):
             or canonical_slug == normalized_model_id
             or canonical_slug.endswith(f"/{normalized_model_id}")
         )
-        if not is_match:
-            continue
+        if is_match:
+            return model
 
+    return None
+
+
+def get_model_context_window(model_id, api_key):
+    """Return ``(context_window, source)`` for a model id.
+
+    Prefers a live value from OpenRouter, then falls back to the static
+    ``MODEL_CONTEXT_WINDOWS`` table, then to ``DEFAULT_CONTEXT_WINDOW``.
+    """
+    model = find_model(fetch_openrouter_models(api_key), model_id)
+    if model is not None:
         direct_context = model.get("context_length")
         provider_context = model.get("top_provider", {}).get("context_length")
         resolved_ctx_len = direct_context or provider_context
         if isinstance(resolved_ctx_len, int) and resolved_ctx_len > 0:
             return resolved_ctx_len, "OpenRouter"
 
+    normalized_model_id = str(model_id or "").strip().lower()
     return (
         MODEL_CONTEXT_WINDOWS.get(normalized_model_id, DEFAULT_CONTEXT_WINDOW),
         "static_fallback",
@@ -88,6 +98,36 @@ def estimate_prompt_tokens(system_prompt, history_items):
         total += estimate_text_tokens(entry.get("role", ""))
         total += estimate_text_tokens(entry.get("content", ""))
     return total + 2
+
+
+def _average_content_tokens(messages, role):
+    """Mean estimated content tokens across messages of ``role``, or None."""
+    counts = [
+        estimate_text_tokens(m.get("content", ""))
+        for m in messages
+        if m.get("role") == role
+    ]
+    return sum(counts) / len(counts) if counts else None
+
+
+def predict_next_call_tokens(system_prompt, messages):
+    """Predict ``(input_tokens, output_tokens)`` for the next LLM call.
+
+    The next call resends the system prompt plus the full existing history, then
+    one more user message (whose length we extrapolate from the average user
+    message so far); the model replies with one assistant message (extrapolated
+    from the average assistant message so far).
+
+    Returns ``None`` when there is no completed exchange to extrapolate from
+    (e.g. the very first prompt of a chat), so callers can display "N/A".
+    """
+    avg_user = _average_content_tokens(messages, "user")
+    avg_assistant = _average_content_tokens(messages, "assistant")
+    if avg_user is None or avg_assistant is None:
+        return None
+
+    input_tokens = estimate_prompt_tokens(system_prompt, messages) + 4 + avg_user
+    return int(round(input_tokens)), int(round(avg_assistant))
 
 
 @dataclass(frozen=True)

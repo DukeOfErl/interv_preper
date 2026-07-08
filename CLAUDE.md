@@ -19,7 +19,7 @@ uv run pytest path/to/test.py::name  # run a single test
 
 `OPENROUTER_API_KEY` must be set before running — via a local `.env` file (see `.env.example`, loaded by `config.load_api_key()`) or the environment. The app talks to OpenRouter via the OpenAI SDK (`base_url="https://openrouter.ai/api/v1"`), not to OpenAI directly. If the key is missing, `chat_bot.py` shows an `st.error` and calls `st.stop()` (fail fast).
 
-`main.py` is an unused stub. **`chat_bot.py` is the entry point** — a thin Streamlit shell; the logic lives in the `interview_prep/` package.
+**`chat_bot.py` is the entry point** — a thin Streamlit shell; the logic lives in the `interview_prep/` package.
 
 ## Architecture
 
