@@ -35,3 +35,27 @@ Then open http://localhost:8501. For best results, paste the job ad and your res
 ```bash
 uv run pytest
 ```
+
+## Prompt evaluation
+
+The `evals/` package is a standalone tool for evaluating the interview-prep system prompts — it is **not** part of the chatbot (the app never imports it). It loads the *real* composed prompt from `prompts/`, runs it against a dataset of interview scenarios, and judges the responses with [DeepEval](https://deepeval.com) (LLM-as-a-judge), using OpenRouter as the judge.
+
+Six metrics run per scenario: DeepEval's built-in `answer_relevancy`, plus custom `GEval` rubrics — `asks_one_question`, `actionable_feedback`, `refuses_fabrication`, `stays_on_scope`, and `behavior_rules` (which is built dynamically from the behavior rules the markdown itself lists). Editing a prompt file and re-running tells you whether the change helped.
+
+```bash
+uv run python -m evals                      # score the current prompt, print a report
+uv run python -m evals --limit 3            # cheaper smoke run (first 3 scenarios)
+uv run python -m evals --metrics asks_one_question behavior_rules
+uv run python -m evals --fail-under 0.7     # non-zero exit if overall mean is below 0.7 (CI)
+uv run python -m evals --prompt-files simple_interviewer.md   # evaluate a different prompt set
+```
+
+By default the harness evaluates the exact prompt set the chatbot uses (`config.PROMPT_FILE_NAMES`). Pass `--prompt-files` with one or more markdown file names from `prompts/` (order matters; they are concatenated) to evaluate an experimental prompt instead.
+
+The same evaluation is also wired into pytest as `integration`-marked tests (skipped unless `OPENROUTER_API_KEY` is set, since they make real calls):
+
+```bash
+uv run pytest -m integration -k evals
+```
+
+The default judge is `openai/gpt-4.1-mini` and the app-under-test defaults to `openai/gpt-5-mini`; override with `--judge-model` / `--app-model`. To A/B test an edited prompt programmatically, call `evals.evaluate_prompt(system_prompt=...)`.
