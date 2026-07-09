@@ -15,6 +15,7 @@ from interview_prep.context import (
     estimate_text_tokens,
     predict_next_call_tokens,
 )
+from interview_prep.guardrails import JailbreakGuard
 from interview_prep.llm import InterviewLLM
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
 from interview_prep.prompts import PromptLibrary
@@ -97,10 +98,19 @@ def main() -> None:
         st.rerun()
 
     if prompt := st.chat_input(placeholder, key="main_chat_input"):
-        messages.append({"role": "user", "content": prompt})
-        # Rerun immediately so usage recomputes with the user prompt included
-        # before the assistant reply streams (handled by the block above).
-        st.rerun()
+        # Screen for jailbreak / prompt-injection before spending a real call.
+        # Fails open, so a classifier outage never blocks legitimate prompts.
+        verdict = JailbreakGuard(api_key=api_key).check(prompt)
+        if verdict.allowed:
+            messages.append({"role": "user", "content": prompt})
+            # Rerun immediately so usage recomputes with the user prompt included
+            # before the assistant reply streams (handled by the block above).
+            st.rerun()
+        else:
+            st.warning(
+                "⚠️ That prompt was blocked by the safety guardrail"
+                + (f": {verdict.reason}" if verdict.reason else ".")
+            )
 
 
 if __name__ == "__main__":

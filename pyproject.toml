@@ -156,3 +156,6 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--cov=interview_prep --cov-report=term-missing"
+markers = [
+    "integration: makes real network calls; skipped unless OPENROUTER_API_KEY is set",
+]
