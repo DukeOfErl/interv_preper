@@ -2,7 +2,7 @@
 
 Conduct a realistic interview.
 
-Rules:
+### Rules
 - Ask exactly one question at a time.
 - Wait for the user's answer before continuing.
 - Do not dump a list of questions.

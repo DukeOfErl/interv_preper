@@ -19,7 +19,7 @@ uv run pytest path/to/test.py::name  # run a single test
 
 `OPENROUTER_API_KEY` must be set before running — via a local `.env` file (see `.env.example`, loaded by `config.load_api_key()`) or the environment. The app talks to OpenRouter via the OpenAI SDK (`base_url="https://openrouter.ai/api/v1"`), not to OpenAI directly. If the key is missing, `chat_bot.py` shows an `st.error` and calls `st.stop()` (fail fast).
 
-`main.py` is an unused stub. **`chat_bot.py` is the entry point** — a thin Streamlit shell; the logic lives in the `interview_prep/` package.
+**`chat_bot.py` is the entry point** — a thin Streamlit shell; the logic lives in the `interview_prep/` package.
 
 ## Architecture
 
@@ -45,3 +45,13 @@ uv run pytest path/to/test.py::name  # run a single test
 ## Evals
 
 `deepeval` and `pytest` (with xdist/rerunfailures) are dev dependencies for evaluating interviewer quality. `user_prompt_for_eval.txt` is a sample intake input used as an eval fixture.
+
+**`evals/` is a standalone prompt-evaluation package — not part of the chatbot** (the Streamlit app never imports it). It loads the real composed system prompt via `interview_prep.prompts.PromptLibrary`, generates a reply per scenario with an app-under-test caller, and judges each reply with DeepEval metrics through OpenRouter. Run it with `uv run python -m evals` (see README for flags), or via the `integration`-marked tests in `tests/test_evals_integration.py`.
+
+- `evals/judge.py` — `OpenRouterJudge(DeepEvalBaseLLM)` (the judge wrapper) and `AppUnderTest` (the non-streaming one-turn caller that mirrors what `chat_bot.py` sends, prompt verbatim)
+- `evals/dataset.py` — interview scenarios as `Golden`s; `key_aspects` → `Golden.context`, `category`/`difficulty`/`id` → `additional_metadata`
+- `evals/metrics.py` — the 6 metrics keyed by `METRIC_NAMES`; `behavior_rules` is a `GEval` built dynamically from the bullet rules extracted from the system prompt (`extract_behavior_rules`)
+- `evals/runner.py` — `evaluate_prompt(...)` orchestrates generate → judge → aggregate into an `EvalReport`; pass `system_prompt=` to A/B test an edited prompt
+- `evals/__main__.py` — the `python -m evals` CLI (`--limit`, `--metrics`, `--threshold`, `--fail-under`, model overrides)
+
+To change what "good" means, edit the `GEval` criteria in `metrics.py`; to change what is tested, edit `SCENARIOS` in `dataset.py`. Score convention is DeepEval's: a float in `[0, 1]`, higher is better.

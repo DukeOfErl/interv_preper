@@ -16,6 +16,11 @@ DEFAULT_MODEL = "GPT-5-Mini"
 TYPING_DELAY_SECONDS = 0.05
 MODELS_CACHE_TTL_SECONDS = 3600
 
+# Pre-send guardrail: a small, fast classifier that screens user prompts for
+# jailbreak / prompt-injection attempts before they reach the interviewer LLM.
+GUARDRAIL_MODEL = "openai/gpt-5-nano"
+GUARDRAIL_PROMPT_FILE = "guardrail.md"
+
 # Markdown prompt files, concatenated in this order to build the system prompt.
 PROMPT_FILE_NAMES = [
     "main_system_prompt.md",

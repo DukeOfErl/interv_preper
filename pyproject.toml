@@ -146,7 +146,16 @@ dev = [
     "matplotlib-inline==0.2.2",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
     "pytest-repeat==0.9.4",
     "pytest-rerunfailures==16.4",
     "pytest-xdist==3.8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--cov=interview_prep --cov-report=term-missing"
+markers = [
+    "integration: makes real network calls; skipped unless OPENROUTER_API_KEY is set",
 ]
