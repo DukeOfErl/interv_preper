@@ -72,10 +72,6 @@ class JailbreakGuard:
                     {"role": "user", "content": user_text},
                 ],
                 response_format={"type": "json_object"},
-                # Minimize hidden reasoning tokens: this is a tiny binary
-                # classification, so heavy deliberation only adds latency/cost
-                # and risks crowding the JSON out of the token budget.
-                extra_body={"reasoning": {"effort": "low"}},
             )
             content = response.choices[0].message.content or ""
             verdict = json.loads(content)

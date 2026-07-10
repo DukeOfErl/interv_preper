@@ -6,7 +6,52 @@ import streamlit as st
 
 from .context import ContextUsage
 from .pricing import ChatSpend, format_spend
-from .prompts import PromptLibrary
+from .prompts import PromptLibrary, PromptSource
+
+
+def render_prompt_selector(sources: list[PromptSource]) -> None:
+    """Render the system-prompt source picker.
+
+    The selectbox is bound to ``st.session_state["prompt_source_key"]``; picking
+    a new source triggers a rerun and the entry point rebuilds the prompt from
+    it. A folder icon marks multi-file (directory) sources.
+    """
+    with st.sidebar:
+        st.subheader("Interviewer")
+
+        def _label(key: str) -> str:
+            source = next(s for s in sources if s.key == key)
+            return f"📁 {source.label}" if source.is_directory else source.label
+
+        st.selectbox(
+            "System prompt",
+            options=[s.key for s in sources],
+            format_func=_label,
+            key="prompt_source_key",
+            help=(
+                "Pick a single prompt file or a folder of files that are "
+                "concatenated in numeric-prefix order."
+            ),
+        )
+
+
+def render_reasoning_selector(efforts: list[str]) -> None:
+    """Render the reasoning-effort picker.
+
+    Only call this when the active model is a reasoning model — the caller
+    decides whether to show it. Bound to ``st.session_state["reasoning_effort"]``.
+    """
+    with st.sidebar:
+        st.subheader("Reasoning")
+        st.selectbox(
+            "Effort",
+            options=efforts,
+            key="reasoning_effort",
+            help=(
+                "How hard the model thinks before answering. Higher effort can "
+                "improve quality but adds latency and cost."
+            ),
+        )
 
 
 def render_sidebar(
@@ -53,7 +98,14 @@ def render_sidebar(
         st.title("Developer Dashboard")
 
         st.subheader("Prompt Config")
-        st.caption("Markdown prompt files used by the chatbot")
+        if library.source is not None:
+            kind = "folder" if library.source.is_directory else "file"
+            st.caption(
+                f"Active source: **{library.source.label}** ({kind}) — "
+                f"{len(library.files)} markdown file(s), in this order:"
+            )
+        else:
+            st.caption("Markdown prompt files used by the chatbot")
         for prompt_file in library.files:
             status = "found" if prompt_file.exists else "missing"
             st.text(f"- {prompt_file.name} ({status})")

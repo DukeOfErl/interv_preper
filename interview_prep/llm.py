@@ -16,10 +16,14 @@ class InterviewLLM:
         self,
         api_key,
         model,
+        reasoning_effort=None,
         base_url=OPENROUTER_BASE_URL,
         typing_delay=TYPING_DELAY_SECONDS,
     ):
         self.model = model
+        # Reasoning effort ("low"/"medium"/"high") for reasoning models, or None
+        # to send no reasoning param (non-reasoning models).
+        self.reasoning_effort = reasoning_effort
         self.typing_delay = typing_delay
         self._client = OpenAI(base_url=base_url, api_key=api_key)
         # Token usage from the most recent stream_reply() call (OpenAI-style
@@ -39,12 +43,17 @@ class InterviewLLM:
             {"role": "system", "content": system_prompt},
             *[{"role": m["role"], "content": m["content"]} for m in messages],
         ]
-        stream = self._client.chat.completions.create(
-            model=self.model,
-            messages=chat_messages,
-            stream=True,
-            stream_options={"include_usage": True},
-        )
+        create_kwargs = {
+            "model": self.model,
+            "messages": chat_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if self.reasoning_effort:
+            create_kwargs["extra_body"] = {
+                "reasoning": {"effort": self.reasoning_effort}
+            }
+        stream = self._client.chat.completions.create(**create_kwargs)
         for chunk in stream:
             if getattr(chunk, "usage", None):
                 self.last_usage = chunk.usage

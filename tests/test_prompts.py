@@ -1,4 +1,8 @@
-from interview_prep.prompts import PromptLibrary
+from interview_prep.prompts import (
+    PromptLibrary,
+    default_source,
+    discover_sources,
+)
 
 
 def _write(dir_path, name, text):
@@ -43,3 +47,72 @@ def test_preview_truncates_to_max_lines(tmp_path):
 
     preview = library.preview(prompt_file, max_lines=3)
     assert preview == "line0\nline1\nline2"
+
+
+def test_discover_finds_files_and_dirs_and_hides_ignored(tmp_path):
+    _write(tmp_path, "simple.md", "Simple")
+    _write(tmp_path, "guardrail.ignore.md", "Not a persona")
+    sub = tmp_path / "multi"
+    sub.mkdir()
+    _write(sub, "10_a.md", "A")
+    _write(sub, "20_b.md", "B")
+
+    sources = {s.key: s for s in discover_sources(tmp_path)}
+
+    # The ignored file never becomes a source.
+    assert "guardrail.ignore.md" not in sources
+    assert set(sources) == {"simple.md", "multi"}
+    assert sources["simple.md"].is_directory is False
+    assert sources["multi"].is_directory is True
+
+
+def test_directory_source_orders_by_numeric_prefix(tmp_path):
+    sub = tmp_path / "multi"
+    sub.mkdir()
+    # Written out of order and non-alphabetical to prove numeric sorting wins.
+    _write(sub, "20_second.md", "Second")
+    _write(sub, "10_first.md", "First")
+    _write(sub, "15_middle.md", "Middle")  # gap-numbered insertion
+    _write(sub, "noprefix.md", "Last")  # unnumbered sorts last
+
+    (source,) = discover_sources(tmp_path)
+    library = PromptLibrary.from_source(source)
+
+    assert [f.name for f in library.files] == [
+        "10_first.md",
+        "15_middle.md",
+        "20_second.md",
+        "noprefix.md",
+    ]
+    assert library.system_prompt == "First\n\nMiddle\n\nSecond\n\nLast"
+
+
+def test_ignored_file_inside_directory_is_skipped(tmp_path):
+    sub = tmp_path / "multi"
+    sub.mkdir()
+    _write(sub, "10_a.md", "A")
+    _write(sub, "20_b.ignore.md", "hidden")
+
+    (source,) = discover_sources(tmp_path)
+    assert [p.name for p in source.file_paths] == ["10_a.md"]
+
+
+def test_default_source_prefers_configured_key(tmp_path, monkeypatch):
+    monkeypatch.setattr("interview_prep.prompts.DEFAULT_PROMPT_SOURCE", "multi")
+    _write(tmp_path, "aaa.md", "A")  # sorts first alphabetically
+    sub = tmp_path / "multi"
+    sub.mkdir()
+    _write(sub, "10_a.md", "A")
+
+    sources = discover_sources(tmp_path)
+    assert default_source(sources).key == "multi"
+
+
+def test_default_source_falls_back_to_first(tmp_path, monkeypatch):
+    monkeypatch.setattr("interview_prep.prompts.DEFAULT_PROMPT_SOURCE", "absent")
+    _write(tmp_path, "aaa.md", "A")
+    _write(tmp_path, "bbb.md", "B")
+
+    sources = discover_sources(tmp_path)
+    assert default_source(sources).key == "aaa.md"
+    assert default_source([]) is None
