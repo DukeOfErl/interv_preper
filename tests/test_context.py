@@ -7,6 +7,7 @@ from interview_prep.context import (
     estimate_prompt_tokens,
     estimate_text_tokens,
     get_model_context_window,
+    model_supports_reasoning,
     predict_next_call_tokens,
 )
 
@@ -111,6 +112,39 @@ def test_unknown_everywhere_returns_default(catalog):
 
 def test_blank_model_id_short_circuits(catalog):
     assert get_model_context_window("", "key") == (None, "static_fallback")
+
+
+# --- reasoning support detection --------------------------------------------
+
+
+REASONING_CATALOG = [
+    {"id": "openai/gpt-5-mini", "supported_parameters": ["reasoning", "tools"]},
+    {"id": "openai/gpt-4o-mini", "supported_parameters": ["tools"]},
+    {"id": "vendor/no-params"},  # missing supported_parameters entirely
+]
+
+
+@pytest.fixture
+def reasoning_catalog(monkeypatch):
+    monkeypatch.setattr(
+        context, "fetch_openrouter_models", lambda api_key: REASONING_CATALOG
+    )
+
+
+def test_reasoning_model_detected(reasoning_catalog):
+    assert model_supports_reasoning("gpt-5-mini", "key") is True
+
+
+def test_non_reasoning_model_detected(reasoning_catalog):
+    assert model_supports_reasoning("gpt-4o-mini", "key") is False
+
+
+def test_model_without_params_is_not_reasoning(reasoning_catalog):
+    assert model_supports_reasoning("no-params", "key") is False
+
+
+def test_unknown_model_is_not_reasoning(reasoning_catalog):
+    assert model_supports_reasoning("totally-unknown", "key") is False
 
 
 # --- ContextUsage -----------------------------------------------------------

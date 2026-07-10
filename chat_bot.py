@@ -8,18 +8,33 @@ and drives the Streamlit chat loop.
 
 import streamlit as st
 
-from interview_prep.config import DEFAULT_MODEL, load_api_key
+from interview_prep.config import (
+    DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORTS,
+    load_api_key,
+)
 from interview_prep.context import (
     compute_context_usage,
     estimate_prompt_tokens,
     estimate_text_tokens,
+    model_supports_reasoning,
     predict_next_call_tokens,
 )
 from interview_prep.guardrails import JailbreakGuard
 from interview_prep.llm import InterviewLLM
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
-from interview_prep.prompts import PromptLibrary
-from interview_prep.ui import render_history, render_sidebar
+from interview_prep.prompts import (
+    PromptLibrary,
+    default_source,
+    discover_sources,
+)
+from interview_prep.ui import (
+    render_history,
+    render_prompt_selector,
+    render_reasoning_selector,
+    render_sidebar,
+)
 
 
 def main() -> None:
@@ -31,10 +46,10 @@ def main() -> None:
         )
         st.stop()
 
-    library = PromptLibrary.load()
-    if library.is_empty:
+    sources = discover_sources()
+    if not sources:
         st.error(
-            "Markdown prompt files could not be loaded, so interview prep is not "
+            "No prompt sources found in prompts/, so interview prep is not "
             "available."
         )
         st.stop()
@@ -42,10 +57,40 @@ def main() -> None:
     st.session_state.setdefault("openai_model", DEFAULT_MODEL)
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("total_cost", 0.0)
+    st.session_state.setdefault("prompt_source_key", default_source(sources).key)
+    # A stored key can go stale if a source is renamed/removed between runs;
+    # reset it before the widget renders, since the selectbox requires its bound
+    # value to be one of the current options.
+    source_keys = {s.key for s in sources}
+    if st.session_state["prompt_source_key"] not in source_keys:
+        st.session_state["prompt_source_key"] = default_source(sources).key
+
+    # Render the selector first so a change is reflected on the same run.
+    render_prompt_selector(sources)
+    selected = next(
+        s for s in sources if s.key == st.session_state["prompt_source_key"]
+    )
+
+    library = PromptLibrary.from_source(selected)
+    if library.is_empty:
+        st.error(
+            "The selected prompt source has no usable markdown content, so "
+            "interview prep is not available."
+        )
+        st.stop()
 
     model = st.session_state["openai_model"]
     system_prompt = library.system_prompt
     messages = st.session_state["messages"]
+
+    # Reasoning effort is only meaningful for reasoning models, so the selector
+    # is shown (and the param sent) only when the active model supports it.
+    supports_reasoning = model_supports_reasoning(model, api_key)
+    reasoning_effort = None
+    if supports_reasoning:
+        st.session_state.setdefault("reasoning_effort", DEFAULT_REASONING_EFFORT)
+        render_reasoning_selector(REASONING_EFFORTS)
+        reasoning_effort = st.session_state["reasoning_effort"]
 
     st.title("Interview preparation Chatbot")
 
@@ -73,7 +118,9 @@ def main() -> None:
     # This runs on the rerun triggered right after a prompt is submitted, so the
     # sidebar above has already recomputed usage with the user prompt included.
     if messages and messages[-1]["role"] == "user":
-        llm = InterviewLLM(api_key=api_key, model=model)
+        llm = InterviewLLM(
+            api_key=api_key, model=model, reasoning_effort=reasoning_effort
+        )
         with st.chat_message("assistant"):
             assistant_reply = st.write_stream(
                 llm.stream_reply(system_prompt, messages)

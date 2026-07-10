@@ -65,6 +65,20 @@ def find_model(models, model_id):
     return None
 
 
+def model_supports_reasoning(model_id, api_key) -> bool:
+    """True if the OpenRouter catalog lists ``reasoning`` for this model.
+
+    Returns ``False`` when the model isn't found or the catalog is unavailable
+    (e.g. offline), so the reasoning-effort selector simply stays hidden rather
+    than being offered for a model that would reject it.
+    """
+    model = find_model(fetch_openrouter_models(api_key), model_id)
+    if model is None:
+        return False
+    supported = model.get("supported_parameters") or []
+    return "reasoning" in supported
+
+
 def get_model_context_window(model_id, api_key):
     """Return ``(context_window, source)`` for a model id.
 

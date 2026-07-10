@@ -63,3 +63,23 @@ def test_stream_reply_prepends_system_then_history(monkeypatch):
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "hello"},
     ]
+
+
+def test_no_reasoning_param_by_default(monkeypatch):
+    instance, client = _build_llm(monkeypatch, [_chunk("ok")])
+    list(instance.stream_reply("SYS", []))
+    (call,) = client.chat.completions.calls
+    assert "extra_body" not in call
+
+
+def test_reasoning_effort_is_sent_when_set(monkeypatch):
+    client = _FakeClient([_chunk("ok")])
+    monkeypatch.setattr(llm, "OpenAI", lambda **kwargs: client)
+    instance = InterviewLLM(
+        api_key="key", model="test-model", reasoning_effort="high", typing_delay=0
+    )
+
+    list(instance.stream_reply("SYS", []))
+
+    (call,) = client.chat.completions.calls
+    assert call["extra_body"] == {"reasoning": {"effort": "high"}}
