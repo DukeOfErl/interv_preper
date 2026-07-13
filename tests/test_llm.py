@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from interview_prep import llm
 from interview_prep.llm import InterviewLLM
 
@@ -83,3 +85,19 @@ def test_reasoning_effort_is_sent_when_set(monkeypatch):
 
     (call,) = client.chat.completions.calls
     assert call["extra_body"] == {"reasoning": {"effort": "high"}}
+
+
+def test_stream_reply_propagates_client_errors(monkeypatch):
+    # chat_bot.main() relies on this: the API error must surface so the entry
+    # point can catch it and show a friendly warning (e.g. a rejected key)
+    # instead of stream_reply swallowing it.
+    class _Boom:
+        def create(self, **kwargs):
+            raise RuntimeError("api down")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_Boom()))
+    monkeypatch.setattr(llm, "OpenAI", lambda **kwargs: client)
+    instance = InterviewLLM(api_key="k", model="m", typing_delay=0)
+
+    with pytest.raises(RuntimeError):
+        list(instance.stream_reply("sys", [{"role": "user", "content": "hi"}]))

@@ -7,6 +7,7 @@ and drives the Streamlit chat loop.
 """
 
 import streamlit as st
+from openai import APIError, AuthenticationError
 
 from interview_prep.config import (
     DEFAULT_MODEL,
@@ -30,6 +31,7 @@ from interview_prep.prompts import (
     discover_sources,
 )
 from interview_prep.ui import (
+    render_api_key_input,
     render_history,
     render_prompt_selector,
     render_reasoning_selector,
@@ -38,11 +40,16 @@ from interview_prep.ui import (
 
 
 def main() -> None:
-    api_key = load_api_key()
+    # Prefer a key from the environment/.env; otherwise let the user paste one
+    # into the sidebar (kept in session only). Fail fast until we have a key.
+    env_key = load_api_key()
+    key_from_env = bool(env_key)
+    api_key = env_key or render_api_key_input()
     if not api_key:
-        st.error(
-            "OPENROUTER_API_KEY is not set. Add it to a .env file (see .env.example) "
-            "or export it in your environment, then restart the app."
+        st.info(
+            "Enter your OpenRouter API key in the sidebar to get started. "
+            "Alternatively, set OPENROUTER_API_KEY in a .env file (see "
+            ".env.example) or your environment and restart."
         )
         st.stop()
 
@@ -121,10 +128,31 @@ def main() -> None:
         llm = InterviewLLM(
             api_key=api_key, model=model, reasoning_effort=reasoning_effort
         )
-        with st.chat_message("assistant"):
-            assistant_reply = st.write_stream(
-                llm.stream_reply(system_prompt, messages)
+        try:
+            with st.chat_message("assistant"):
+                assistant_reply = st.write_stream(
+                    llm.stream_reply(system_prompt, messages)
+                )
+        except AuthenticationError:
+            # The key was rejected. Keep the pending prompt so the reply is
+            # generated automatically once a working key is supplied.
+            hint = (
+                "Enter a different OpenRouter API key in the sidebar and try "
+                "again."
+                if not key_from_env
+                else "Check the OPENROUTER_API_KEY in your environment/.env, "
+                "then restart the app."
             )
+            st.warning(f"⚠️ That API key didn't work (authentication failed). {hint}")
+            st.stop()
+        except APIError as exc:
+            # Any other OpenRouter/API failure (rate limit, connection, etc.).
+            detail = getattr(exc, "message", None) or str(exc)
+            st.warning(
+                "⚠️ The request to OpenRouter failed, so no reply was generated. "
+                f"Please try again. ({detail})"
+            )
+            st.stop()
 
         # Accrue this turn's cost using the model that produced it, so a chat
         # that switches models later still sums correctly. Prefer the provider's

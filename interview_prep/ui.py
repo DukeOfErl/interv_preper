@@ -9,6 +9,29 @@ from .pricing import ChatSpend, format_spend
 from .prompts import PromptLibrary, PromptSource
 
 
+def render_api_key_input() -> str:
+    """Render a sidebar input for a session-scoped OpenRouter API key.
+
+    Only meant to be shown when no key was found in the environment. The value
+    is held in ``st.session_state["user_api_key"]`` for this browser session
+    only — it is never written to disk. Returns the entered key (stripped).
+    """
+    with st.sidebar:
+        st.subheader("API key")
+        key = st.text_input(
+            "OpenRouter API key",
+            type="password",
+            placeholder="sk-or-...",
+            key="user_api_key",
+            help=(
+                "No OPENROUTER_API_KEY was found in your environment. Enter one "
+                "to use the app. It is kept only for this session (in memory) "
+                "and never saved to disk."
+            ),
+        )
+    return (key or "").strip()
+
+
 def render_prompt_selector(sources: list[PromptSource]) -> None:
     """Render the system-prompt source picker.
 
