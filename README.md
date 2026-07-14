@@ -16,7 +16,7 @@ The interviewer's behavior is defined entirely in the markdown prompt files unde
 - Files inside a folder are concatenated by a **leading number** in the filename (`10_…`, `20_…`). Use **gap numbering** (10, 20, 30 rather than 1, 2, 3) so you can insert a file between two others (e.g. `15_…`) without renumbering the rest. Unnumbered files sort last.
 - A file whose name ends with **`.ignore.md`** is hidden from the selector (used for non-persona prompts such as `guardrail.ignore.md`).
 
-Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together.
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`architecture.md`](architecture.md) for a diagram of how the pieces fit together.
 
 ## Setup
 
