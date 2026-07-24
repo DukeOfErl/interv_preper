@@ -133,6 +133,17 @@ def warning_message(entry) -> str:
             f"**{entry['name']}** replaced a previously ingested document "
             "with the same name."
         )
+    if entry["kind"] == "retrieval":
+        return (
+            "Document retrieval failed — this reply was generated **without** "
+            "document context. Your documents are still indexed; the next turn "
+            "will try again."
+        )
+    if entry["kind"] == "condense":
+        return (
+            "Couldn't rephrase your message into a search query — retrieved "
+            "using your message as-is, which may match your documents less well."
+        )
     return (
         f"**{entry['name']}** was not accepted because it couldn't be "
         f"processed ({entry['reason']}). You can try uploading it again."

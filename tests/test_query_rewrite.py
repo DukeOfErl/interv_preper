@@ -38,23 +38,29 @@ def test_returns_rewritten_query_stripped():
         "tell me more about that",
         [{"role": "assistant", "content": "You mentioned a Kubernetes migration."}],
     )
-    assert result == "Kubernetes migration at Acme"
+    assert result.query == "Kubernetes migration at Acme"
+    assert not result.errored
 
 
-def test_exception_falls_open_to_original_question():
+def test_exception_falls_open_flagged_errored():
     condenser = make_condenser(exc=RuntimeError("api down"))
     result = condenser.condense("tell me more about that", [{"role": "user", "content": "hi"}])
-    assert result == "tell me more about that"
+    assert result.query == "tell me more about that"
+    assert result.errored
 
 
-def test_blank_response_falls_open_to_original_question():
+def test_blank_response_falls_open_flagged_errored():
     condenser = make_condenser(content="   ")
-    assert condenser.condense("what about my leadership?", []) == "what about my leadership?"
+    result = condenser.condense("what about my leadership?", [])
+    assert result.query == "what about my leadership?"
+    assert result.errored
 
 
-def test_none_response_falls_open():
+def test_none_response_falls_open_flagged_errored():
     condenser = make_condenser(content=None)
-    assert condenser.condense("original question", []) == "original question"
+    result = condenser.condense("original question", [])
+    assert result.query == "original question"
+    assert result.errored
 
 
 def test_sends_instructions_and_history_and_question():

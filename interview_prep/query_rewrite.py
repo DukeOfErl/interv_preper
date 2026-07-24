@@ -12,6 +12,8 @@ original message so retrieval still runs and the turn is never blocked.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from openai import OpenAI
 
 from .config import (
@@ -20,6 +22,19 @@ from .config import (
     QUERY_REWRITE_MODEL,
     QUERY_REWRITE_PROMPT_FILE,
 )
+
+
+@dataclass(frozen=True)
+class QueryRewrite:
+    """Result of a condensation attempt.
+
+    ``errored`` is True when the rewrite failed and we fell open to the raw
+    message (so the caller can warn the user transparently). ``query`` is always
+    usable — the rewritten query on success, or the original question on failure.
+    """
+
+    query: str
+    errored: bool = False
 
 
 def load_query_rewrite_prompt(prompt_dir=PROMPTS_DIR, file_name=QUERY_REWRITE_PROMPT_FILE):
@@ -57,11 +72,12 @@ class QueryCondenser:
         # Allow an injected client (tests); otherwise build the real one.
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
 
-    def condense(self, question, history) -> str:
+    def condense(self, question, history) -> QueryRewrite:
         """Rewrite ``question`` into a standalone query using ``history`` context.
 
-        Fails open: on any exception or an empty/blank response, returns
-        ``question`` unchanged so retrieval proceeds on the raw text.
+        Fails open: on any exception or an empty/blank response, returns the
+        original ``question`` flagged with ``errored=True`` so the caller can
+        surface a warning while retrieval still proceeds on the raw text.
         """
         conversation = _format_history(history)
         user_content = (
@@ -80,5 +96,7 @@ class QueryCondenser:
             )
             rewritten = (response.choices[0].message.content or "").strip()
         except Exception:
-            return question
-        return rewritten or question
+            return QueryRewrite(question, errored=True)
+        if not rewritten:
+            return QueryRewrite(question, errored=True)
+        return QueryRewrite(rewritten, errored=False)

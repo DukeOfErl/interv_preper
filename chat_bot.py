@@ -65,6 +65,24 @@ from interview_prep.ui import (
 )
 
 
+def record_warning(name, kind, reason=""):
+    """Record a warning in both places: the permanent Warnings-tab log, and a
+    one-shot flash shown in the chat window on the next run.
+
+    Used for document events (rejections, overwrites) and per-turn knowledge
+    failures (retrieval / query-rewrite falling open) — anything the user
+    should transparently know went wrong while the app kept running.
+    """
+    entry = {
+        "name": name,
+        "kind": kind,
+        "reason": reason,
+        "time": datetime.now().strftime("%H:%M:%S"),
+    }
+    st.session_state["warnings_log"].append(entry)
+    st.session_state["flash_warnings"].append(warning_message(entry))
+
+
 def sync_documents(api_key, container) -> DocumentIndex:
     """Render the document widgets into ``container`` and sync the vector index.
 
@@ -102,19 +120,6 @@ def sync_documents(api_key, container) -> DocumentIndex:
                 for doc in docs:
                     index.add_document(doc)
         st.session_state["doc_index"] = index
-
-    def record_warning(name, kind, reason=""):
-        # Document warnings (rejections, overwrites) land in two places: the
-        # permanent Warnings-tab log, and a one-shot flash shown in the chat
-        # window on the very next run.
-        entry = {
-            "name": name,
-            "kind": kind,
-            "reason": reason,
-            "time": datetime.now().strftime("%H:%M:%S"),
-        }
-        st.session_state["warnings_log"].append(entry)
-        st.session_state["flash_warnings"].append(warning_message(entry))
 
     new_files = [
         f
@@ -309,21 +314,24 @@ def main() -> None:
                 # and skip the extra call. Condensing fails open to the prompt.
                 if messages:
                     with st.spinner("Rephrasing your question for search…"):
-                        query = QueryCondenser(api_key=api_key).condense(
+                        rewrite = QueryCondenser(api_key=api_key).condense(
                             prompt, messages[-QUERY_REWRITE_HISTORY_TURNS:]
                         )
+                    query = rewrite.query
+                    # Fail open, but tell the user we searched with the raw
+                    # message instead of a rewritten query.
+                    if rewrite.errored:
+                        record_warning("", "condense")
                 else:
                     query = prompt
                 st.session_state["last_query"] = query
                 try:
                     with st.spinner("Retrieving document excerpts…"):
                         retrieved = doc_index.retrieve(query)
-                except Exception:
+                except Exception as exc:
+                    # Fail open: answer without document context, but say so.
                     retrieved = []
-                    st.warning(
-                        "⚠️ Document retrieval failed — answering without "
-                        "document context this turn."
-                    )
+                    record_warning("", "retrieval", str(exc))
                 st.session_state["last_retrieval"] = retrieved
                 context_block = format_context_block(retrieved)
             effective_prompt = fill_retrieved_context(system_prompt, context_block)
