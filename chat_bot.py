@@ -18,6 +18,7 @@ from interview_prep.config import (
     DEFAULT_REASONING_EFFORT,
     EMBEDDING_MODELS,
     GUARDRAIL_DOC_MODEL,
+    QUERY_REWRITE_HISTORY_TURNS,
     REASONING_EFFORTS,
     load_api_key,
 )
@@ -43,6 +44,7 @@ from interview_prep.prompts import (
     default_source,
     discover_sources,
 )
+from interview_prep.query_rewrite import QueryCondenser
 from interview_prep.retrieval import (
     DocumentIndex,
     fill_retrieved_context,
@@ -78,6 +80,7 @@ def sync_documents(api_key, container) -> DocumentIndex:
     st.session_state.setdefault("warnings_log", [])
     st.session_state.setdefault("flash_warnings", [])
     st.session_state.setdefault("last_retrieval", [])
+    st.session_state.setdefault("last_query", "")
     st.session_state.setdefault("doc_uploader_nonce", 0)
 
     # The nonce rotates the widget key after each processed batch, emptying the
@@ -272,7 +275,9 @@ def main() -> None:
     )
     with dev_tab:
         render_sidebar(library, usage, spend)
-        render_retrieval_panel(st.session_state["last_retrieval"])
+        render_retrieval_panel(
+            st.session_state["last_retrieval"], st.session_state["last_query"]
+        )
     render_history(messages)
 
     has_user_prompt = any(m.get("role") == "user" for m in messages)
@@ -298,8 +303,18 @@ def main() -> None:
         context_block = ""
         if library.is_grounding_aware:
             if not doc_index.is_empty:
-                recent = [m["content"] for m in messages[-2:]]
-                query = "\n".join(recent + [prompt])
+                # On a follow-up, rewrite the message into a standalone query so
+                # vector search isn't handed an anaphoric fragment ("that role").
+                # The first turn has no referents to resolve — use it verbatim
+                # and skip the extra call. Condensing fails open to the prompt.
+                if messages:
+                    with st.spinner("Rephrasing your question for search…"):
+                        query = QueryCondenser(api_key=api_key).condense(
+                            prompt, messages[-QUERY_REWRITE_HISTORY_TURNS:]
+                        )
+                else:
+                    query = prompt
+                st.session_state["last_query"] = query
                 try:
                     with st.spinner("Retrieving document excerpts…"):
                         retrieved = doc_index.retrieve(query)

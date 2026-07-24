@@ -71,6 +71,15 @@ RETRIEVED_CONTEXT_PLACEHOLDER = "{retrieved_context}"
 DOCUMENT_TYPES = ["resume", "job ad", "cover letter", "other"]
 UPLOAD_FILE_TYPES = ["pdf", "docx", "txt", "md"]
 
+# Before retrieval on a follow-up turn, a small model rewrites the user's
+# message into a standalone search query (resolving "that", "it", etc.) so
+# vector search isn't handed an anaphoric fragment. Cheap/fast because it sits
+# on the turn's critical path (before the reply streams); skipped on the first
+# turn and whenever we're not retrieving. Fails open to the raw message.
+QUERY_REWRITE_MODEL = "openai/gpt-4.1-nano"
+QUERY_REWRITE_PROMPT_FILE = "query_rewrite.ignore.md"
+QUERY_REWRITE_HISTORY_TURNS = 4
+
 # --- Prompt selection ---------------------------------------------------------
 #
 # The system prompt is chosen at runtime from ``prompts/``. Each selectable

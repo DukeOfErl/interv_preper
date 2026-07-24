@@ -175,9 +175,12 @@ def render_documents_panel(docs, index) -> None:
         )
 
 
-def render_retrieval_panel(last_retrieval) -> None:
-    """Show the chunks retrieved for the most recent turn, with provenance."""
+def render_retrieval_panel(last_retrieval, last_query="") -> None:
+    """Show the query and chunks used for the most recent retrieval."""
     with st.expander("Last Retrieval", expanded=False):
+        if last_query:
+            st.caption("Search query (rewritten from the message):")
+            st.code(last_query, language="text")
         if not last_retrieval:
             st.caption("No retrieval has run yet.")
         for chunk in last_retrieval:
