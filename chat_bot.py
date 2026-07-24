@@ -260,14 +260,6 @@ def main() -> None:
 
     st.title("Interview preparation Chatbot")
 
-    # Flash warnings: queued when a document is rejected (that run ends in an
-    # immediate rerun to clear the drop zone), shown here exactly once — the
-    # next rerun, whatever triggers it, no longer sees them. The permanent
-    # record lives in the Warnings tab.
-    for message in st.session_state["flash_warnings"]:
-        st.warning(f"⚠️ {message}")
-    st.session_state["flash_warnings"] = []
-
     usage = compute_context_usage(model, api_key, system_prompt, messages)
     pricing = get_model_pricing(model, api_key)
     next_tokens = predict_next_call_tokens(system_prompt, messages)
@@ -284,6 +276,15 @@ def main() -> None:
             st.session_state["last_retrieval"], st.session_state["last_query"]
         )
     render_history(messages)
+
+    # Flash warnings render at the BOTTOM of the conversation — just above the
+    # chat input, where the user's attention is — because a banner at the top
+    # scrolls out of view once the chat grows. Shown exactly once: queued on the
+    # run that failed (which ends in a rerun), displayed on the next run, then
+    # cleared. The durable record lives in the Warnings tab.
+    for message in st.session_state["flash_warnings"]:
+        st.warning(f"⚠️ {message}")
+    st.session_state["flash_warnings"] = []
 
     has_user_prompt = any(m.get("role") == "user" for m in messages)
     placeholder = (
