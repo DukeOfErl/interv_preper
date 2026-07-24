@@ -13,7 +13,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import DEFAULT_PROMPT_SOURCE, IGNORE_TAG, PROMPTS_DIR
+from .config import (
+    DEFAULT_PROMPT_SOURCE,
+    IGNORE_TAG,
+    PROMPTS_DIR,
+    RETRIEVED_CONTEXT_PLACEHOLDER,
+)
 
 # Leading run of digits in a filename, used to order files within a subdirectory.
 _ORDER_PREFIX = re.compile(r"^(\d+)")
@@ -163,6 +168,16 @@ class PromptLibrary:
     @property
     def is_empty(self) -> bool:
         return not self.system_prompt
+
+    @property
+    def is_grounding_aware(self) -> bool:
+        """True if this prompt opts into retrieved-document context.
+
+        A source declares itself grounding-aware by containing the
+        ``{retrieved_context}`` placeholder; retrieved chunks are injected only
+        there. Sources without it behave exactly as before documents existed.
+        """
+        return RETRIEVED_CONTEXT_PLACEHOLDER in self.system_prompt
 
     def preview(self, prompt_file: PromptFile, max_lines: int = 8) -> str:
         return "\n".join(prompt_file.content.splitlines()[:max_lines])

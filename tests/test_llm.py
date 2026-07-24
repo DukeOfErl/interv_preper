@@ -11,6 +11,11 @@ def _chunk(content):
     return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=content))])
 
 
+def _usage_chunk(**usage_fields):
+    """Build a final streaming chunk carrying a usage object (no content)."""
+    return SimpleNamespace(choices=[], usage=SimpleNamespace(**usage_fields))
+
+
 class _FakeCompletions:
     def __init__(self, chunks):
         self._chunks = chunks
@@ -67,14 +72,16 @@ def test_stream_reply_prepends_system_then_history(monkeypatch):
     ]
 
 
-def test_no_reasoning_param_by_default(monkeypatch):
+def test_usage_accounting_requested_without_reasoning_by_default(monkeypatch):
+    # Usage accounting is always requested (for the real cost); no reasoning
+    # param is added for a non-reasoning model.
     instance, client = _build_llm(monkeypatch, [_chunk("ok")])
     list(instance.stream_reply("SYS", []))
     (call,) = client.chat.completions.calls
-    assert "extra_body" not in call
+    assert call["extra_body"] == {"usage": {"include": True}}
 
 
-def test_reasoning_effort_is_sent_when_set(monkeypatch):
+def test_reasoning_effort_is_sent_alongside_usage_when_set(monkeypatch):
     client = _FakeClient([_chunk("ok")])
     monkeypatch.setattr(llm, "OpenAI", lambda **kwargs: client)
     instance = InterviewLLM(
@@ -84,7 +91,40 @@ def test_reasoning_effort_is_sent_when_set(monkeypatch):
     list(instance.stream_reply("SYS", []))
 
     (call,) = client.chat.completions.calls
-    assert call["extra_body"] == {"reasoning": {"effort": "high"}}
+    assert call["extra_body"] == {
+        "usage": {"include": True},
+        "reasoning": {"effort": "high"},
+    }
+
+
+def test_captures_cost_and_reasoning_tokens_from_usage(monkeypatch):
+    details = SimpleNamespace(reasoning_tokens=128)
+    chunks = [
+        _chunk("hi"),
+        _usage_chunk(
+            prompt_tokens=10,
+            completion_tokens=200,
+            completion_tokens_details=details,
+            cost=0.0123,
+        ),
+    ]
+    instance, _ = _build_llm(monkeypatch, chunks)
+
+    list(instance.stream_reply("system", []))
+
+    assert instance.last_cost == pytest.approx(0.0123)
+    assert instance.last_reasoning_tokens == 128
+    assert instance.last_usage is not None
+
+
+def test_missing_cost_and_reasoning_leave_none(monkeypatch):
+    # No usage chunk at all -> nothing to extract.
+    instance, _ = _build_llm(monkeypatch, [_chunk("hi")])
+
+    list(instance.stream_reply("system", []))
+
+    assert instance.last_cost is None
+    assert instance.last_reasoning_tokens is None
 
 
 def test_stream_reply_propagates_client_errors(monkeypatch):

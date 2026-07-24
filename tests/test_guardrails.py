@@ -72,6 +72,38 @@ def test_api_exception_fails_open():
     assert result.errored
 
 
+def test_check_document_scans_long_text_in_windows():
+    guard = make_guard(content='{"is_jailbreak": false}')
+    result = guard.check_document("x" * 3000, window_chars=1200, overlap_chars=200)
+    assert result.allowed
+    # 3000 chars at a step of 1000 → three windows, three classifier calls.
+    assert len(guard._client.chat.completions.calls) == 3
+
+
+def test_check_document_rejects_when_any_window_is_flagged():
+    guard = make_guard(content='{"is_jailbreak": true, "reason": "injection"}')
+    result = guard.check_document("x" * 3000, window_chars=1200, overlap_chars=200)
+    assert not result.allowed
+    assert result.reason == "injection"
+    # Windows are scanned concurrently, so all of them run even when one flags.
+    assert len(guard._client.chat.completions.calls) == 3
+
+
+def test_check_document_propagates_errored_verdict():
+    # An errored (failed-open) window verdict surfaces so document callers can
+    # fail closed on it.
+    guard = make_guard(exc=RuntimeError("api down"))
+    result = guard.check_document("short document")
+    assert result.errored
+
+
+def test_check_document_short_text_is_single_window():
+    guard = make_guard(content='{"is_jailbreak": false}')
+    result = guard.check_document("just one small document")
+    assert result.allowed
+    assert len(guard._client.chat.completions.calls) == 1
+
+
 def test_check_sends_instructions_and_prompt():
     guard = make_guard(content='{"is_jailbreak": false}')
     guard.check("my prompt")
