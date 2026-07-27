@@ -109,5 +109,5 @@ flowchart TB
 ```
 
 The full module-by-module list (what each file exports) lives in
-[`CLAUDE.md`](../CLAUDE.md) and the [`README`](../README.md) — inventories read
+[`CLAUDE.md`](../../CLAUDE.md) and the [`README`](../../README.md) — inventories read
 better as text than as boxes.

@@ -80,11 +80,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 When a change alters the architecture or user-visible functionality in a major way (new module, new pipeline, new UI capability, changed data flow), update **all four** docs in the same change — they serve different readers and go stale independently:
 
 - **`README.md`** — what the app does and how to use it (for users and new developers)
-- **`diagrams/`** — the user/developer diagrams (currently `diagrams/architecture.md`), updated **following the principles in `diagrams/DIAGRAMS.md`** (one diagram per story, sequence diagrams for temporal flows, ~7±2 boxes each), together with the references to these diagrams from `README.md`
-- **`REQUIREMENTS.md`** — the behavioral spec (what the app must do, kept implementation-agnostic)
+- **`docs/diagrams/`** — the user/developer diagrams (currently `docs/diagrams/architecture.md`), updated **following the principles in `docs/diagrams/DIAGRAMS.md`** (one diagram per story, sequence diagrams for temporal flows, ~7±2 boxes each), together with the references to these diagrams from `README.md`
+- **`docs/REQUIREMENTS.md`** — the behavioral spec (what the app must do, kept implementation-agnostic)
 - **`CLAUDE.md`** — this file's Architecture section (how the code is organized, for coding agents)
 
 Small fixes and internal refactors that don't change behavior or structure don't need this.
+
+**Architecture Decision Records (`docs/decisions/`).** When a decision shapes the project in a way worth remembering — a non-obvious technical choice, an accepted trade-off, a convention, a reversal — record it as an ADR. Copy `docs/decisions/0000-decision-template.md` to `docs/decisions/NNNN-concise-kebab-name.md`, where `NNNN` is the highest existing id **plus 10** (the first real ADR is `0010-…`; `0000` is the reserved template). Gap numbering leaves room to slot a later decision between two existing ones. Fill in status, date, the pull request, and the context / decision / trade-off. Write the ADR as part of the same change that makes the decision — not retroactively.
+
+**Changelog (`CHANGELOG.md`).** Keep `CHANGELOG.md` (project root, Keep a Changelog format) current as work progresses: for any user-visible or otherwise notable change (new capability, changed behavior, removal, fix), add a bullet under `## [Unreleased]` in the appropriate Added / Changed / Removed / Fixed group. Move those bullets into a versioned section when a release is tagged.
 
 ## What this is
 
