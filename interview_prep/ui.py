@@ -12,6 +12,7 @@ import streamlit as st
 from .config import DOCUMENT_TYPES, UPLOAD_FILE_TYPES
 from .context import ContextUsage
 from .pricing import ChatSpend, format_spend
+from .privacy import PrivacyLevel, PrivacyPolicy, status_label
 from .prompts import PromptLibrary, PromptSource
 
 
@@ -36,6 +37,29 @@ def render_api_key_input() -> str:
             ),
         )
     return (key or "").strip()
+
+
+def render_privacy_status(policy: PrivacyPolicy) -> None:
+    """One-line, colour-coded statement of the provider's data-privacy posture.
+
+    Always rendered, never only on bad news: the user is uploading a resume, and
+    an absence of warnings is indistinguishable from an absence of checking. The
+    three levels map onto Streamlit's coloured alert boxes so the posture is
+    readable at a glance without reading the words — green when a request
+    parameter enforces it, blue when only the provider's terms promise it, red
+    when neither applies. The label is deliberately terse enough for one sidebar
+    line; the reasoning lives in the tooltip.
+    """
+    if policy.level == PrivacyLevel.ENFORCED:
+        render, icon = st.success, "🔒"
+    elif policy.level == PrivacyLevel.PROVIDER_STATED:
+        render, icon = st.info, "📋"
+    else:
+        render, icon = st.error, "⚠️"
+    render(f"{icon} {status_label(policy)}")
+    # Collapsed by default so the status itself stays a single line.
+    with st.expander("What this means", expanded=False):
+        st.caption(f"**{policy.provider}** — {policy.detail}")
 
 
 def render_prompt_selector(sources: list[PromptSource]) -> None:

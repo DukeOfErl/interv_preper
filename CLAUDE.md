@@ -88,6 +88,8 @@ Small fixes and internal refactors that don't change behavior or structure don't
 
 **Architecture Decision Records (`docs/decisions/`).** When a decision shapes the project in a way worth remembering — a non-obvious technical choice, an accepted trade-off, a convention, a reversal — record it as an ADR. Copy `docs/decisions/0000-decision-template.md` to `docs/decisions/NNNN-concise-kebab-name.md`, where `NNNN` is the highest existing id **plus 10** (the first real ADR is `0010-…`; `0000` is the reserved template). Gap numbering leaves room to slot a later decision between two existing ones. Fill in status, date, the pull request, and the context / decision / trade-off. Write the ADR as part of the same change that makes the decision — not retroactively.
 
+**Open items (`docs/OPEN-ITEMS.md`).** Work that is knowingly unfinished, and judgement calls deliberately deferred, go here rather than dying with the session that found them — unverified assumptions, manual checks still owed, decisions parked pending something else. Check it when picking up a subsystem; remove an item when it closes (and if closing it settled a decision, write the ADR instead of editing the note).
+
 **Changelog (`CHANGELOG.md`).** Keep `CHANGELOG.md` (project root, Keep a Changelog format) current as work progresses: for any user-visible or otherwise notable change (new capability, changed behavior, removal, fix), add a bullet under `## [Unreleased]` in the appropriate Added / Changed / Removed / Fixed group. Move those bullets into a versioned section when a release is tagged.
 
 ## What this is
@@ -117,8 +119,9 @@ uv run pytest path/to/test.py::name  # run a single test
 - `prompts.py` — `PromptSource` / `PromptLibrary` / `PromptFile`: discover, load, and compose the markdown prompt
 - `context.py` — token estimation + `get_model_context_window()`; `compute_context_usage()` returns a `ContextUsage`
 - `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens
+- `privacy.py` — `PROVIDER_POLICIES` (keyed by base URL): the per-provider data-privacy posture. A **gate, not a notice** — `require_privacy_extra_body()` raises `PrivacyNotEnsuredError` and is called from **every** transmitting client's constructor, so no client exists for a provider we can't vouch for; `policy_for()` / `privacy_extra_body()` are the non-raising UI accessors
 - `ingest.py` — `parse_document()` (PDF/DOCX/TXT/MD → text), `infer_doc_type()`, `should_ingest()` (the fail-closed screening policy)
-- `retrieval.py` — `DocumentIndex` (LangChain `InMemoryVectorStore` + `OpenAIEmbeddings` via OpenRouter), `format_context_block()` / `fill_retrieved_context()` (the context-block contract)
+- `retrieval.py` — `DocumentIndex` (LangChain `InMemoryVectorStore` + `PrivateOpenAIEmbeddings`, a raw-SDK embedder so the privacy params are explicit — see ADR-0110), `format_context_block()` / `fill_retrieved_context()` (the context-block contract)
 - `query_rewrite.py` — `QueryCondenser`: rewrites a follow-up message into a standalone retrieval query (fails open)
 - `ui.py` — `render_prompt_selector()` / `render_sidebar()` / `render_history()` / document uploader + panels
 
@@ -145,8 +148,8 @@ The default source, `prompts/multi-role interviewer/`, holds the staged prompts:
 
 **Subsystem behavior & rationale live in the docs, not here** (so this file stays lean and the detail stays in one canonical place):
 
-- **`docs/REQUIREMENTS.md`** — the behavioral spec: document RAG, the guardrails, query condensation, cost/token accounting, reasoning effort, streaming.
-- **`docs/decisions/`** — the ADRs (0010–0090): *why* each of those was built the way it was (e.g. fail-closed windowed document guardrail vs. fail-open concurrent chat guardrail; condense queries + defer LangGraph; LangChain for retrieval, raw SDK for chat).
+- **`docs/REQUIREMENTS.md`** — the behavioral spec: document RAG, the guardrails, query condensation, cost/token accounting, reasoning effort, streaming, provider data privacy (§17).
+- **`docs/decisions/`** — the ADRs (0010–0110): *why* each of those was built the way it was (e.g. fail-closed windowed document guardrail vs. fail-open concurrent chat guardrail; condense queries + defer LangGraph; LangChain for retrieval, raw SDK for chat and embeddings; the provider data-privacy registry and the fail-closed gate over it).
 - **`docs/diagrams/architecture.md`** — the chat-turn, ingestion, and module-map diagrams.
 
 Read the relevant doc when a task touches that subsystem; keep it and the code in sync per **Documentation upkeep** above.

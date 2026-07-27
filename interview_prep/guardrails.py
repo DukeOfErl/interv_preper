@@ -27,6 +27,7 @@ from .config import (
     OPENROUTER_BASE_URL,
     PROMPTS_DIR,
 )
+from .privacy import require_privacy_extra_body
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,10 @@ class JailbreakGuard:
         self.instructions = (
             instructions if instructions is not None else load_guardrail_prompt()
         )
+        self.base_url = base_url
+        # Fail closed before the client exists — the screened text is the user's
+        # own prompt or uploaded document.
+        self.privacy_extra_body = require_privacy_extra_body(base_url)
         # Allow an injected client (tests); otherwise build the real one.
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
 
@@ -76,6 +81,7 @@ class JailbreakGuard:
                     {"role": "user", "content": user_text},
                 ],
                 response_format={"type": "json_object"},
+                extra_body=dict(self.privacy_extra_body),
             )
             content = response.choices[0].message.content or ""
             verdict = json.loads(content)

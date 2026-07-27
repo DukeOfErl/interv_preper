@@ -22,6 +22,7 @@ from .config import (
     QUERY_REWRITE_MODEL,
     QUERY_REWRITE_PROMPT_FILE,
 )
+from .privacy import require_privacy_extra_body
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,10 @@ class QueryCondenser:
         self.instructions = (
             instructions if instructions is not None else load_query_rewrite_prompt()
         )
+        self.base_url = base_url
+        # Fail closed before the client exists — this call ships the user's
+        # message and recent history.
+        self.privacy_extra_body = require_privacy_extra_body(base_url)
         # Allow an injected client (tests); otherwise build the real one.
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
 
@@ -93,6 +98,7 @@ class QueryCondenser:
                     {"role": "system", "content": self.instructions},
                     {"role": "user", "content": user_content},
                 ],
+                extra_body=dict(self.privacy_extra_body),
             )
             rewritten = (response.choices[0].message.content or "").strip()
         except Exception:

@@ -18,6 +18,7 @@ from interview_prep.config import (
     DEFAULT_REASONING_EFFORT,
     EMBEDDING_MODELS,
     GUARDRAIL_DOC_MODEL,
+    OPENROUTER_BASE_URL,
     QUERY_REWRITE_HISTORY_TURNS,
     REASONING_EFFORTS,
     load_api_key,
@@ -39,6 +40,7 @@ from interview_prep.ingest import (
 )
 from interview_prep.llm import InterviewLLM
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
+from interview_prep.privacy import policy_for
 from interview_prep.prompts import (
     PromptLibrary,
     default_source,
@@ -58,6 +60,7 @@ from interview_prep.ui import (
     render_documents_panel,
     render_embedding_selector,
     render_history,
+    render_privacy_status,
     render_prompt_selector,
     render_reasoning_selector,
     render_retrieval_panel,
@@ -212,6 +215,28 @@ def main() -> None:
         ["Interview", "Developer", "Warnings"]
     )
 
+    # The privacy gate, before anything that can transmit user content. Render the
+    # status into the sidebar first so a blocked run still shows *why*, then stop:
+    # st.stop() here precedes sync_documents(), so the uploader widget never even
+    # renders. Telling the user after they had uploaded would be a post-mortem —
+    # the documents would already have been parsed, guardrail-scanned (an outbound
+    # call), and embedded. Nothing below this point runs for an unensured provider.
+    privacy_policy = policy_for(OPENROUTER_BASE_URL)
+    with interview_tab:
+        render_privacy_status(privacy_policy)
+    if not privacy_policy.is_ensured:
+        st.error(
+            f"⚠️ **Interview prep is unavailable: {privacy_policy.provider} is not "
+            "a provider whose data-usage policy this app knows.**\n\n"
+            "Nothing has been sent. Your documents and messages could not be "
+            "guaranteed to stay out of model training, so the app refuses to "
+            "transmit them rather than warn you afterwards — an upload cannot be "
+            "undone.\n\n"
+            "If you know this endpoint's policy, register it in "
+            "`interview_prep/privacy.py` (`PROVIDER_POLICIES`) and restart."
+        )
+        st.stop()
+
     model = st.session_state["openai_model"]
     # Reasoning effort is only meaningful for reasoning models, so the selector
     # is shown (and the param sent) only when the active model supports it.
@@ -247,10 +272,11 @@ def main() -> None:
         ),
     )
 
-    # Interview tab, top → bottom: interviewer picker, effort selector just below
-    # it, the context-window usage gauge, then the spend figures (no header — the
-    # labels speak for themselves), then a slot the grounding warning fills once
-    # document state is known. All of this sits above the document drop zone.
+    # Interview tab, continuing below the privacy status rendered above:
+    # interviewer picker, effort selector just below it, the context-window usage
+    # gauge, then the spend figures (no header — the labels speak for themselves),
+    # then a slot the grounding warning fills once document state is known. All of
+    # this sits above the document drop zone.
     reasoning_effort = None
     with interview_tab:
         render_prompt_selector(sources)
@@ -393,9 +419,16 @@ def main() -> None:
                     slot.empty()
                     stream_failed = True
                     detail = getattr(exc, "message", None) or str(exc)
+                    # A model served only by providers that store/train on data
+                    # is now refused rather than routed (see privacy.py), so
+                    # "no allowed providers" is a real cause worth naming — it
+                    # is fixed by choosing a different model, not by retrying.
                     st.warning(
                         "⚠️ The request to OpenRouter failed, so no reply was "
-                        f"generated. Please try again. ({detail})"
+                        "generated. Please try again, or pick a different model "
+                        "— this can also mean no provider for the current model "
+                        "meets the data-privacy requirement shown in the "
+                        f"sidebar. ({detail})"
                     )
 
         if stream_failed:

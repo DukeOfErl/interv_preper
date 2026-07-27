@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from interview_prep.guardrails import GuardrailResult, JailbreakGuard
+from interview_prep.privacy import PrivacyNotEnsuredError
 
 
 class FakeCompletions:
@@ -114,3 +115,24 @@ def test_check_sends_instructions_and_prompt():
     }
     assert sent["messages"][1] == {"role": "user", "content": "my prompt"}
     assert sent["response_format"] == {"type": "json_object"}
+
+
+def test_unknown_provider_cannot_be_constructed():
+    # The guardrail sees every uploaded document, so it must fail closed too —
+    # even with a client injected, an unensured provider is refused.
+    with pytest.raises(PrivacyNotEnsuredError):
+        JailbreakGuard(
+            api_key="key",
+            instructions="x",
+            base_url="https://gateway.example/v1",
+            client=FakeClient(content="{}"),
+        )
+
+
+def test_screened_text_carries_the_provider_privacy_params():
+    # The guardrail sees the user's prompt and every uploaded document, so it is
+    # as sensitive as the interview call itself and gets the same posture.
+    guard = make_guard(content="{}")
+    guard.check("my prompt")
+    (sent,) = guard._client.chat.completions.calls
+    assert sent["extra_body"] == {"provider": {"data_collection": "deny"}}

@@ -13,6 +13,20 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "GPT-5-Mini"
+
+# Base URLs of the providers whose data-privacy posture we know (see
+# ``privacy.py``). Only OpenRouter is reachable from the app today; the other
+# two are registered so that pointing a client at them resolves to their real
+# policy instead of the "unknown" fallback.
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+
+# Date the providers' *stated* (contractual, non-enforceable) privacy policies
+# were last read and verified. Shown in the sidebar for providers whose
+# no-training guarantee is a published default rather than a request parameter
+# we can send — the user deserves to know how fresh that claim is. Re-read the
+# providers' data-usage docs and bump this when revisiting.
+PRIVACY_POLICY_CHECKED_DATE = "2026-07-27"
 TYPING_DELAY_SECONDS = 0.05
 MODELS_CACHE_TTL_SECONDS = 3600
 
@@ -66,6 +80,9 @@ EMBEDDING_MODELS = [
 DEFAULT_EMBEDDING_MODEL = EMBEDDING_MODELS[0]
 CHUNK_SIZE_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 150
+# Chunks per /embeddings request. Batched because a multi-page resume produces
+# dozens of chunks and one request each would be needlessly slow.
+EMBEDDING_BATCH_SIZE = 100
 TOP_K = 6
 RETRIEVED_CONTEXT_PLACEHOLDER = "{retrieved_context}"
 DOCUMENT_TYPES = ["resume", "job ad", "cover letter", "other"]

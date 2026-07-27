@@ -20,7 +20,7 @@ The interviewer's behavior is defined entirely in the markdown prompt files unde
 - A file whose name ends with **`.ignore.md`** is hidden from the selector (used for non-persona prompts such as `guardrail.ignore.md`).
 - A prompt that contains the **`{retrieved_context}` placeholder** is *grounding-aware*: excerpts retrieved from the uploaded documents are injected there each turn. Prompts without it simply ignore uploaded documents (the sidebar says so).
 
-Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `privacy`, `guardrails`, `ingest`, `retrieval`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
 
 ## Documents (RAG)
 
@@ -33,6 +33,23 @@ Drag-and-drop files into the sidebar's **Documents** uploader (PDF, DOCX, TXT, o
 Each turn, the most relevant chunks are retrieved and injected into the system prompt, so the interviewer asks about *your* projects and probes gaps between *your* resume and *the* job ad. The **Ingested Documents** panel shows each document's inferred type (resume / job ad / cover letter — correctable), and the **Last Retrieval** panel shows exactly which excerpts the last answer was grounded in.
 
 Embeddings are computed through OpenRouter's `/embeddings` endpoint; the model is selectable in the sidebar (switching re-embeds all documents). With no documents uploaded, the interviewer collects the same context through intake questions as before.
+
+## Data privacy
+
+Your resume and cover letter are sent to an LLM provider, so privacy here is a **gate, not a notice**: if it can't be established, the data doesn't leave. A one-line, colour-coded status sits at the top of the **Interview** sidebar tab — above the uploader, so you see it before you decide what to upload:
+
+| Status | Meaning |
+|---|---|
+| 🔒 **No data-training risk** (green) | Every request carries a parameter that prevents it. With OpenRouter, that's `data_collection: deny` — your prompts and documents are never routed to a provider that may store or train on them. |
+| 📋 **Privacy provider-stated on _date_** (blue) | The provider offers no such request parameter, but their published terms say they don't train on API data. The date is when those terms were last verified. |
+| ⚠️ **Privacy not ensured** (red) | The provider isn't one whose data-usage policy the app knows — **the app refuses to run.** No uploader appears and no message can be sent, because a warning that arrives after your resume has been embedded is useless. Register the endpoint in `interview_prep/privacy.py` if you know its policy. |
+
+The block is deliberately **not overridable** — there's no "send anyway". This covers **every** call the app makes — the interview itself, the safety guardrail, the query rewriter, and the document embeddings — not just the main chat, and it's enforced when each client is created, so no code path can skip it.
+
+Two things worth knowing:
+
+- **Your OpenRouter account settings are the broader control.** Under Settings → Privacy, turn off *"allow routing to providers that may train on your data"* (there are separate toggles for paid and free models). The per-request parameter this app sends complements that account-level switch; it does not replace it.
+- **Some models become unavailable.** A model served only by providers that store or train on data will now fail rather than quietly routing to one. If a request fails, try a different model.
 
 ## Setup
 

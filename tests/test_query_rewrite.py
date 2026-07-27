@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
+
+from interview_prep.privacy import PrivacyNotEnsuredError
 from interview_prep.query_rewrite import QueryCondenser
 
 
@@ -87,3 +90,22 @@ def test_no_history_sends_bare_question():
     condenser.condense("what roles fit me?", [])
     user_content = condenser._client.chat.completions.calls[0]["messages"][1]["content"]
     assert user_content == "what roles fit me?"
+
+
+def test_unknown_provider_cannot_be_constructed():
+    with pytest.raises(PrivacyNotEnsuredError):
+        QueryCondenser(
+            api_key="key",
+            instructions="x",
+            base_url="https://gateway.example/v1",
+            client=FakeClient(content="rewritten"),
+        )
+
+
+def test_condense_call_carries_the_provider_privacy_params():
+    # The rewrite call ships the user's message plus recent history, so it gets
+    # the same privacy posture as the interview call.
+    condenser = make_condenser(content="rewritten")
+    condenser.condense("what roles fit me?", [])
+    (sent,) = condenser._client.chat.completions.calls
+    assert sent["extra_body"] == {"provider": {"data_collection": "deny"}}

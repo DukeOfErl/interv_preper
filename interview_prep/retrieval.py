@@ -1,8 +1,14 @@
 """Chunking, embedding, indexing, and retrieval for uploaded documents.
 
-Built on LangChain: ``OpenAIEmbeddings`` pointed at OpenRouter's
-OpenAI-compatible ``/embeddings`` endpoint, and an ``InMemoryVectorStore``
-(session-scoped, like the rest of the chat state — nothing touches disk).
+Uses LangChain's ``InMemoryVectorStore`` and text splitter (session-scoped, like
+the rest of the chat state — nothing touches disk), but embeds through
+:class:`PrivateOpenAIEmbeddings`, a small adapter over the raw OpenAI SDK rather
+than ``langchain_openai.OpenAIEmbeddings``. Document chunks are the most sensitive
+payload the app sends, and ``OpenAIEmbeddings`` exposes no way to attach the
+provider's privacy params except via ``model_kwargs`` forwarding — undocumented
+behavior that could stop working on a dependency upgrade with *no runtime signal*.
+See ADR-0110: for an irreversible disclosure, an explicit argument beats a tested
+escape hatch.
 
 ``format_context_block`` + ``fill_retrieved_context`` define the context-block
 contract: the one place that decides the shape of the text injected into a
@@ -14,18 +20,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import InMemoryVectorStore
-from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from openai import OpenAI
 
 from .config import (
     CHUNK_OVERLAP_CHARS,
     CHUNK_SIZE_CHARS,
+    EMBEDDING_BATCH_SIZE,
     OPENROUTER_BASE_URL,
     RETRIEVED_CONTEXT_PLACEHOLDER,
     TOP_K,
 )
 from .ingest import IngestedDocument
+from .privacy import require_embedding_privacy_extra_body
 
 
 @dataclass(frozen=True)
@@ -39,19 +48,54 @@ class RetrievedChunk:
     score: float
 
 
+class PrivateOpenAIEmbeddings(Embeddings):
+    """Embeddings over the raw OpenAI SDK, with the privacy params explicit.
+
+    Implements the two abstract methods ``InMemoryVectorStore`` actually calls on
+    a sync path (``add_texts`` → ``embed_documents``,
+    ``similarity_search_with_score`` → ``embed_query``); the async variants come
+    from the base class and no sync path uses them.
+
+    Constructing this **raises** for a provider whose data-usage policy is
+    unknown, so there is no object capable of shipping document chunks there.
+    """
+
+    def __init__(self, api_key, model, base_url, client=None, batch_size=None):
+        self.model = model
+        self.base_url = base_url
+        self.batch_size = batch_size or EMBEDDING_BATCH_SIZE
+        # Fail closed before the client exists. Narrowed to the keys /embeddings
+        # accepts — some privacy params are chat-only and would be rejected.
+        self.privacy_extra_body = require_embedding_privacy_extra_body(base_url)
+        # Allow an injected client (tests); otherwise build the real one.
+        self._client = client or OpenAI(base_url=base_url, api_key=api_key)
+
+    def embed_documents(self, texts):
+        vectors = []
+        for start in range(0, len(texts), self.batch_size):
+            response = self._client.embeddings.create(
+                model=self.model,
+                input=texts[start : start + self.batch_size],
+                # An explicit argument, not a forwarded kwarg: it cannot silently
+                # stop being sent when a dependency changes.
+                extra_body=dict(self.privacy_extra_body),
+            )
+            vectors.extend(item.embedding for item in response.data)
+        return vectors
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+
 class DocumentIndex:
     """Session-scoped vector index over the uploaded documents."""
 
-    def __init__(self, api_key, embedding_model, embeddings=None):
+    def __init__(self, api_key, embedding_model, embeddings=None, base_url=None):
         self.embedding_model = embedding_model
-        # Allow injected embeddings (tests); otherwise embed via OpenRouter.
-        # check_embedding_ctx_length uses tiktoken to pre-tokenize, which only
-        # works for OpenAI-named models — disabled so any catalog model works.
-        self._embeddings = embeddings or OpenAIEmbeddings(
-            model=embedding_model,
-            api_key=api_key,
-            base_url=OPENROUTER_BASE_URL,
-            check_embedding_ctx_length=False,
+        base_url = base_url or OPENROUTER_BASE_URL
+        # Allow injected embeddings (tests); otherwise embed via the provider.
+        self._embeddings = embeddings or PrivateOpenAIEmbeddings(
+            api_key=api_key, model=embedding_model, base_url=base_url
         )
         self._store = InMemoryVectorStore(self._embeddings)
         self._splitter = RecursiveCharacterTextSplitter(

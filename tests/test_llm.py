@@ -4,6 +4,7 @@ import pytest
 
 from interview_prep import llm
 from interview_prep.llm import InterviewLLM
+from interview_prep.privacy import PrivacyNotEnsuredError
 
 
 def _chunk(content):
@@ -74,11 +75,15 @@ def test_stream_reply_prepends_system_then_history(monkeypatch):
 
 def test_usage_accounting_requested_without_reasoning_by_default(monkeypatch):
     # Usage accounting is always requested (for the real cost); no reasoning
-    # param is added for a non-reasoning model.
+    # param is added for a non-reasoning model. The provider's privacy params
+    # always ride along.
     instance, client = _build_llm(monkeypatch, [_chunk("ok")])
     list(instance.stream_reply("SYS", []))
     (call,) = client.chat.completions.calls
-    assert call["extra_body"] == {"usage": {"include": True}}
+    assert call["extra_body"] == {
+        "usage": {"include": True},
+        "provider": {"data_collection": "deny"},
+    }
 
 
 def test_reasoning_effort_is_sent_alongside_usage_when_set(monkeypatch):
@@ -93,8 +98,41 @@ def test_reasoning_effort_is_sent_alongside_usage_when_set(monkeypatch):
     (call,) = client.chat.completions.calls
     assert call["extra_body"] == {
         "usage": {"include": True},
+        "provider": {"data_collection": "deny"},
         "reasoning": {"effort": "high"},
     }
+
+
+def test_privacy_params_are_per_call_not_shared_state(monkeypatch):
+    # extra_body is assembled fresh each call from a copy of the policy's dict.
+    # If it were the registry's own dict, the reasoning/usage keys written into
+    # it would leak into every later request (and into other call sites).
+    instance, client = _build_llm(monkeypatch, [_chunk("ok"), _chunk("ok")])
+    list(instance.stream_reply("SYS", []))
+    list(instance.stream_reply("SYS", []))
+
+    first, second = client.chat.completions.calls
+    assert first["extra_body"] == second["extra_body"]
+    assert first["extra_body"]["provider"] is not second["extra_body"]["provider"]
+
+
+def test_unknown_provider_cannot_be_constructed(monkeypatch):
+    # Fail closed: for a provider whose data-usage policy we can't vouch for,
+    # there must be no object capable of sending the conversation. Raising at
+    # construction (rather than sending with a warning) is the whole point — a
+    # disclosure cannot be taken back once the request is out.
+    client = _FakeClient([_chunk("ok")])
+    monkeypatch.setattr(llm, "OpenAI", lambda **kwargs: client)
+
+    with pytest.raises(PrivacyNotEnsuredError):
+        InterviewLLM(
+            api_key="key",
+            model="test-model",
+            base_url="https://gateway.example/v1",
+            typing_delay=0,
+        )
+
+    assert client.chat.completions.calls == []
 
 
 def test_captures_cost_and_reasoning_tokens_from_usage(monkeypatch):

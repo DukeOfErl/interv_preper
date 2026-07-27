@@ -17,6 +17,7 @@ from __future__ import annotations
 from openai import OpenAI
 
 from interview_prep.config import OPENROUTER_BASE_URL
+from interview_prep.privacy import require_privacy_extra_body
 from deepeval.models.base_model import DeepEvalBaseLLM
 
 # The judge should be a capable, cheap instruction-follower; the app-under-test
@@ -42,6 +43,9 @@ class OpenRouterJudge(DeepEvalBaseLLM):
         base_url: str = OPENROUTER_BASE_URL,
     ):
         self._model = model
+        self.base_url = base_url
+        # Fail closed before the client exists (see interview_prep.privacy).
+        self.privacy_extra_body = require_privacy_extra_body(base_url)
         self._client = OpenAI(base_url=base_url, api_key=api_key)
 
     def load_model(self):
@@ -51,6 +55,7 @@ class OpenRouterJudge(DeepEvalBaseLLM):
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
+            extra_body=dict(self.privacy_extra_body),
         )
         return response.choices[0].message.content or ""
 
@@ -78,6 +83,9 @@ class AppUnderTest:
         base_url: str = OPENROUTER_BASE_URL,
     ):
         self.model = model
+        self.base_url = base_url
+        # Fail closed before the client exists (see interview_prep.privacy).
+        self.privacy_extra_body = require_privacy_extra_body(base_url)
         self._client = OpenAI(base_url=base_url, api_key=api_key)
 
     def reply(self, system_prompt: str, user_message: str) -> str:
@@ -87,5 +95,6 @@ class AppUnderTest:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
+            extra_body=dict(self.privacy_extra_body),
         )
         return response.choices[0].message.content or ""

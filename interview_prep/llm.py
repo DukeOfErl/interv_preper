@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import time
 
 from openai import OpenAI
 
 from .config import OPENROUTER_BASE_URL, TYPING_DELAY_SECONDS
+from .privacy import require_privacy_extra_body
 
 
 class InterviewLLM:
@@ -25,6 +27,11 @@ class InterviewLLM:
         # to send no reasoning param (non-reasoning models).
         self.reasoning_effort = reasoning_effort
         self.typing_delay = typing_delay
+        self.base_url = base_url
+        # Fail closed before the client exists: raises for a provider whose
+        # data-usage policy we can't vouch for, so there is no object capable of
+        # sending the conversation there.
+        self.privacy_extra_body = require_privacy_extra_body(base_url)
         self._client = OpenAI(base_url=base_url, api_key=api_key)
         # Metadata from the most recent stream_reply() call, populated from the
         # final usage chunk and read after the generator is consumed:
@@ -53,8 +60,9 @@ class InterviewLLM:
             *[{"role": m["role"], "content": m["content"]} for m in messages],
         ]
         # Ask OpenRouter for usage accounting so the final chunk carries the real
-        # cost; the reasoning param (if any) rides in the same extra_body.
-        extra_body = {"usage": {"include": True}}
+        # cost; the provider's privacy params and the reasoning param (if any)
+        # ride in the same extra_body.
+        extra_body = {"usage": {"include": True}, **copy.deepcopy(self.privacy_extra_body)}
         if self.reasoning_effort:
             extra_body["reasoning"] = {"effort": self.reasoning_effort}
         create_kwargs = {

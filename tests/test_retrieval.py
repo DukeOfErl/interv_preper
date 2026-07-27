@@ -1,8 +1,14 @@
+from types import SimpleNamespace
+
+import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
+from interview_prep.config import OPENROUTER_BASE_URL
 from interview_prep.ingest import IngestedDocument
+from interview_prep.privacy import PrivacyNotEnsuredError
 from interview_prep.retrieval import (
     DocumentIndex,
+    PrivateOpenAIEmbeddings,
     RetrievedChunk,
     fill_retrieved_context,
     format_context_block,
@@ -77,6 +83,85 @@ def test_set_doc_type_retags_chunks():
 
 def test_retrieve_on_empty_index_returns_nothing():
     assert make_index().retrieve("anything") == []
+
+
+class _FakeEmbeddingsClient:
+    """Records the kwargs of each /embeddings request; returns unit vectors."""
+
+    def __init__(self):
+        self.calls = []
+        self.embeddings = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        n = len(kwargs["input"])
+        return SimpleNamespace(
+            data=[SimpleNamespace(embedding=[float(i), 1.0]) for i in range(n)]
+        )
+
+
+def _fake_embedder():
+    client = _FakeEmbeddingsClient()
+    return PrivateOpenAIEmbeddings(
+        api_key="key",
+        model="openai/some-embedder",
+        base_url=OPENROUTER_BASE_URL,
+        client=client,
+    ), client
+
+
+def test_document_embeddings_carry_the_provider_privacy_params():
+    """Document chunks are the most sensitive payload the app sends.
+
+    The privacy params are now an explicit ``extra_body`` argument on the raw SDK
+    call rather than a kwarg forwarded by LangChain, so they cannot silently stop
+    being sent when a dependency changes (ADR-0110).
+    """
+    embedder, client = _fake_embedder()
+    embedder.embed_documents(["chunk one", "chunk two"])
+
+    (call,) = client.calls
+    assert call["extra_body"] == {"provider": {"data_collection": "deny"}}
+    assert call["input"] == ["chunk one", "chunk two"]
+
+
+def test_query_embeddings_carry_the_provider_privacy_params():
+    # The query is the user's own message — same posture as the documents.
+    embedder, client = _fake_embedder()
+    embedder.embed_query("what did I do at Acme?")
+
+    (call,) = client.calls
+    assert call["extra_body"] == {"provider": {"data_collection": "deny"}}
+
+
+def test_embeddings_are_batched():
+    embedder, client = _fake_embedder()
+    embedder.batch_size = 2
+    vectors = embedder.embed_documents(["a", "b", "c"])
+
+    assert [len(c["input"]) for c in client.calls] == [2, 1]
+    assert len(vectors) == 3
+
+
+def test_embedder_refuses_an_unensured_provider():
+    # Fail closed: no embedder exists for a provider we can't vouch for, so
+    # document chunks cannot be shipped there at all.
+    with pytest.raises(PrivacyNotEnsuredError):
+        PrivateOpenAIEmbeddings(
+            api_key="key",
+            model="openai/some-embedder",
+            base_url="https://gateway.example/v1",
+            client=_FakeEmbeddingsClient(),
+        )
+
+
+def test_document_index_refuses_an_unensured_provider():
+    with pytest.raises(PrivacyNotEnsuredError):
+        DocumentIndex(
+            api_key="key",
+            embedding_model="openai/some-embedder",
+            base_url="https://gateway.example/v1",
+        )
 
 
 def make_chunk(**overrides):
