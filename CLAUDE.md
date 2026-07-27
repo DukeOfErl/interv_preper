@@ -66,6 +66,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
+## Git project management
+
+**All work happens on a branch, scoped to an explicit work package.** A work package is a one- or two-sentence statement of the goal and what "done" looks like — small enough to live on a single branch and merge as a unit.
+
+- **Branch; don't work on `dev`/`main`.** Each work package gets a dedicated branch off `dev` (or off a daughter branch, for sub-work that builds on still-unmerged work). Integration happens only through the merge flow, which requires the user's explicit approval (a `git merge` / `gh pr merge` guardrail lives in the user's settings).
+- **No branch → stop and advise, don't start editing.** When changes are requested but nothing is open to hold them — the current branch is `dev`/`main`, or a branch whose work package doesn't cover the request — first help the user define a clear work package (goal + done-criteria) and open a dedicated branch for it (propose a name and scope). Begin the changes only once that branch exists.
+- **Drift → flag it, don't silently absorb it.** While a work package is in progress, watch for scope drift: an unrelated fix, a second feature creeping in, or growth well beyond the stated goal. When it happens, say so explicitly ("this is drifting from *&lt;work package&gt;*") and propose how to proceed — typically one of: (a) move the extra work to its own branch off `dev`, (b) consciously widen the current work package if the addition genuinely belongs to it, or (c) defer/stash the tangent. Let the user choose.
+- **Keep branches focused and short-lived** so they stay reviewable and merge cleanly.
+
 ## Documentation upkeep
 
 When a change alters the architecture or user-visible functionality in a major way (new module, new pipeline, new UI capability, changed data flow), update **all four** docs in the same change — they serve different readers and go stale independently:
