@@ -71,7 +71,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 When a change alters the architecture or user-visible functionality in a major way (new module, new pipeline, new UI capability, changed data flow), update **all four** docs in the same change — they serve different readers and go stale independently:
 
 - **`README.md`** — what the app does and how to use it (for users and new developers)
-- **`architecture.md`** — the mermaid diagram + walkthrough (module boundaries, data flow, external calls)
+- **`diagrams/`** — the user/developer diagrams (currently `diagrams/architecture.md`), updated **following the principles in `diagrams/DIAGRAMS.md`** (one diagram per story, sequence diagrams for temporal flows, ~7±2 boxes each), together with the references to these diagrams from `README.md`
 - **`REQUIREMENTS.md`** — the behavioral spec (what the app must do, kept implementation-agnostic)
 - **`CLAUDE.md`** — this file's Architecture section (how the code is organized, for coding agents)
 

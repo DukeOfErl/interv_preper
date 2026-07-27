@@ -20,7 +20,7 @@ The interviewer's behavior is defined entirely in the markdown prompt files unde
 - A file whose name ends with **`.ignore.md`** is hidden from the selector (used for non-persona prompts such as `guardrail.ignore.md`).
 - A prompt that contains the **`{retrieved_context}` placeholder** is *grounding-aware*: excerpts retrieved from the uploaded documents are injected there each turn. Prompts without it simply ignore uploaded documents (the sidebar says so).
 
-Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`architecture.md`](architecture.md) for a diagram of how the pieces fit together.
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`diagrams/architecture.md`](diagrams/architecture.md) for diagrams of how the pieces fit together.
 
 ## Documents (RAG)
 
