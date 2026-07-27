@@ -124,13 +124,45 @@ def _average_content_tokens(messages, role):
     return sum(counts) / len(counts) if counts else None
 
 
+def _average_reasoning_tokens(messages):
+    """Mean reasoning tokens recorded across assistant messages, or 0.0.
+
+    Reasoning tokens are billed as output but never appear in the visible
+    content, so they can't be estimated from text length — we average the counts
+    OpenRouter reported for past turns (0 when none were recorded).
+    """
+    counts = [
+        int(m.get("reasoning_tokens", 0))
+        for m in messages
+        if m.get("role") == "assistant"
+    ]
+    return sum(counts) / len(counts) if counts else 0.0
+
+
+def _average_context_tokens(messages):
+    """Mean retrieved-context tokens recorded across assistant messages, or 0.0.
+
+    When documents are uploaded, each turn injects a retrieved-context block
+    into the system prompt. The block is per-turn (not part of the stored
+    history), so — like reasoning tokens — it is recorded per assistant message
+    and averaged for projections.
+    """
+    counts = [
+        int(m.get("context_tokens", 0))
+        for m in messages
+        if m.get("role") == "assistant"
+    ]
+    return sum(counts) / len(counts) if counts else 0.0
+
+
 def predict_next_call_tokens(system_prompt, messages):
     """Predict ``(input_tokens, output_tokens)`` for the next LLM call.
 
     The next call resends the system prompt plus the full existing history, then
     one more user message (whose length we extrapolate from the average user
     message so far); the model replies with one assistant message (extrapolated
-    from the average assistant message so far).
+    from the average assistant message so far, plus the average reasoning tokens
+    it spent, which are billed as output but never show up in the content).
 
     Returns ``None`` when there is no completed exchange to extrapolate from
     (e.g. the very first prompt of a chat), so callers can display "N/A".
@@ -140,8 +172,14 @@ def predict_next_call_tokens(system_prompt, messages):
     if avg_user is None or avg_assistant is None:
         return None
 
-    input_tokens = estimate_prompt_tokens(system_prompt, messages) + 4 + avg_user
-    return int(round(input_tokens)), int(round(avg_assistant))
+    input_tokens = (
+        estimate_prompt_tokens(system_prompt, messages)
+        + 4
+        + avg_user
+        + _average_context_tokens(messages)
+    )
+    output_tokens = avg_assistant + _average_reasoning_tokens(messages)
+    return int(round(input_tokens)), int(round(output_tokens))
 
 
 @dataclass(frozen=True)
@@ -175,7 +213,9 @@ class ContextUsage:
 
 def compute_context_usage(model, api_key, system_prompt, messages) -> ContextUsage:
     window, source = get_model_context_window(model, api_key)
-    used_tokens = estimate_prompt_tokens(system_prompt, messages)
+    used_tokens = estimate_prompt_tokens(system_prompt, messages) + int(
+        round(_average_context_tokens(messages))
+    )
     return ContextUsage(
         model=model, window=window, source=source, used_tokens=used_tokens
     )

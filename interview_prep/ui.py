@@ -1,9 +1,15 @@
-"""Streamlit rendering helpers."""
+"""Streamlit rendering helpers.
+
+Except for ``render_api_key_input`` (which anchors itself above the sidebar
+tabs), these helpers render into whatever container is active when they are
+called — the entry point wraps each call in a sidebar tab (``with tab:``).
+"""
 
 from __future__ import annotations
 
 import streamlit as st
 
+from .config import DOCUMENT_TYPES, UPLOAD_FILE_TYPES
 from .context import ContextUsage
 from .pricing import ChatSpend, format_spend
 from .prompts import PromptLibrary, PromptSource
@@ -39,23 +45,20 @@ def render_prompt_selector(sources: list[PromptSource]) -> None:
     a new source triggers a rerun and the entry point rebuilds the prompt from
     it. A folder icon marks multi-file (directory) sources.
     """
-    with st.sidebar:
-        st.subheader("Interviewer")
+    def _label(key: str) -> str:
+        source = next(s for s in sources if s.key == key)
+        return f"📁 {source.label}" if source.is_directory else source.label
 
-        def _label(key: str) -> str:
-            source = next(s for s in sources if s.key == key)
-            return f"📁 {source.label}" if source.is_directory else source.label
-
-        st.selectbox(
-            "System prompt",
-            options=[s.key for s in sources],
-            format_func=_label,
-            key="prompt_source_key",
-            help=(
-                "Pick a single prompt file or a folder of files that are "
-                "concatenated in numeric-prefix order."
-            ),
-        )
+    st.selectbox(
+        "Interviewer",
+        options=[s.key for s in sources],
+        format_func=_label,
+        key="prompt_source_key",
+        help=(
+            "Pick a single prompt file or a folder of files that are "
+            "concatenated in numeric-prefix order."
+        ),
+    )
 
 
 def render_reasoning_selector(efforts: list[str]) -> None:
@@ -64,84 +67,219 @@ def render_reasoning_selector(efforts: list[str]) -> None:
     Only call this when the active model is a reasoning model — the caller
     decides whether to show it. Bound to ``st.session_state["reasoning_effort"]``.
     """
-    with st.sidebar:
-        st.subheader("Reasoning")
-        st.selectbox(
-            "Effort",
-            options=efforts,
-            key="reasoning_effort",
-            help=(
-                "How hard the model thinks before answering. Higher effort can "
-                "improve quality but adds latency and cost."
-            ),
+    st.selectbox(
+        "Effort",
+        options=efforts,
+        key="reasoning_effort",
+        help=(
+            "How hard the model thinks before answering. Higher effort can "
+            "improve quality but adds latency and cost."
+        ),
+    )
+
+
+def render_document_uploader(key: str = "doc_uploader"):
+    """Render the drag-and-drop document uploader; returns the uploaded files.
+
+    Only renders the widget — parsing, screening, and indexing are orchestrated
+    by the entry point. The caller rotates ``key`` after processing a batch so
+    the widget empties: it is a pure drop zone, and the authoritative list of
+    what actually got in is the Ingested Documents panel (a rejected file
+    lingering in the widget would read as accepted).
+    """
+    return st.file_uploader(
+        "Documents (resume, job ad, cover letter)",
+        type=UPLOAD_FILE_TYPES,
+        accept_multiple_files=True,
+        key=key,
+        help=(
+            "Drag and drop files here. Each document is scanned by the "
+            "safety guardrail before it is used; documents that fail the "
+            "scan are rejected. Processed files are listed under "
+            "Ingested Documents."
+        ),
+    )
+
+
+def render_embedding_selector(models: list[str]) -> None:
+    """Render the embedding-model picker (bound to ``embedding_model``).
+
+    Switching models re-embeds every ingested document — vectors from
+    different models are not comparable.
+    """
+    st.selectbox(
+        "Embedding model",
+        options=models,
+        key="embedding_model",
+        help=(
+            "Model used to embed document chunks for retrieval. Changing "
+            "it re-embeds all uploaded documents."
+        ),
+    )
+
+
+def warning_message(entry) -> str:
+    """One warning line for a document event (used by the log and the flash)."""
+    if entry["kind"] == "flagged":
+        return f"**{entry['name']}** was rejected by the safety scan" + (
+            f": {entry['reason']}" if entry["reason"] else "."
         )
+    if entry["kind"] == "overwrite":
+        return (
+            f"**{entry['name']}** replaced a previously ingested document "
+            "with the same name."
+        )
+    if entry["kind"] == "retrieval":
+        return (
+            "Document retrieval failed — this reply was generated **without** "
+            "document context. Your documents are still indexed; the next turn "
+            "will try again."
+        )
+    if entry["kind"] == "condense":
+        return (
+            "Couldn't rephrase your message into a search query — retrieved "
+            "using your message as-is, which may match your documents less well."
+        )
+    return (
+        f"**{entry['name']}** was not accepted because it couldn't be "
+        f"processed ({entry['reason']}). You can try uploading it again."
+    )
+
+
+def render_warnings_log(entries) -> None:
+    """The accumulated document-warnings log for the Warnings tab, newest first."""
+    if not entries:
+        st.caption("No warnings this session.")
+        return
+    for entry in reversed(entries):
+        st.warning(f"⚠️ {entry['time']} — {warning_message(entry)}")
+
+
+def render_documents_panel(docs, index) -> None:
+    """Ingestion panel: one re-typeable, removable row per ingested document."""
+    st.subheader("Ingested Documents")
+    if not docs:
+        st.caption("No documents ingested yet.")
+    for doc in list(docs):
+        name_col, rm_col = st.columns([5, 1])
+        name_col.text(doc.name)
+        if rm_col.button("✕", key=f"doc_rm_{doc.name}", help=f"Remove {doc.name}"):
+            index.remove_document(doc.name)
+            docs.remove(doc)
+            st.rerun()
+        new_type = st.selectbox(
+            f"Type of {doc.name}",
+            options=DOCUMENT_TYPES,
+            index=DOCUMENT_TYPES.index(doc.doc_type),
+            key=f"doc_type_{doc.name}",
+            label_visibility="collapsed",
+        )
+        if new_type != doc.doc_type:
+            doc.doc_type = new_type
+            index.set_doc_type(doc.name, new_type)
+        st.caption(
+            f"{doc.n_chunks} chunk(s), ~{doc.token_estimate:,} tokens"
+        )
+
+
+def render_retrieval_panel(last_retrieval, last_query="") -> None:
+    """Show the query and chunks used for the most recent retrieval."""
+    with st.expander("Last Retrieval", expanded=False):
+        if last_query:
+            st.caption("Search query (rewritten from the message):")
+            st.code(last_query, language="text")
+        if not last_retrieval:
+            st.caption("No retrieval has run yet.")
+        for chunk in last_retrieval:
+            st.markdown(
+                f"**{chunk.doc_type}: {chunk.source}** "
+                f"(part {chunk.chunk_id + 1}, score {chunk.score:.3f})"
+            )
+            st.code(chunk.text, language="markdown")
+
+
+def render_spend_metrics(spend: ChatSpend) -> None:
+    """The two spend figures (total + next-prompt estimate); no pricing line."""
+    total_col, next_col = st.columns(2)
+    total_col.metric("Total this chat", format_spend(spend.total_cost))
+    next_col.metric(
+        "Est. next prompt",
+        "N/A" if spend.next_estimate is None else format_spend(spend.next_estimate),
+    )
+
+
+def render_context_bar(usage: ContextUsage) -> None:
+    """Compact context-window usage gauge for the Interview tab (label + bar).
+
+    The full model-context breakdown (model, window, source, percentages) lives
+    in the Developer tab; this is only the gauge, labelled above.
+    """
+    st.caption("Context window usage")
+    st.progress(usage.progress)
 
 
 def render_sidebar(
-    library: PromptLibrary, usage: ContextUsage, spend: ChatSpend
+    library: PromptLibrary,
+    usage: ContextUsage,
+    spend: ChatSpend,
 ) -> None:
-    """Render the model-context, spend, and prompt-config sidebar."""
-    with st.sidebar:
-        st.subheader("Model Context")
-        st.text(f"Model: {usage.model}")
-        st.text(f"Context window: {usage.window_label}")
-        st.caption(f"Context source: {usage.source}")
+    """Render the model-context, spend, and prompt-config sections."""
+    st.subheader("Model Context")
+    st.text(f"Model: {usage.model}")
+    st.text(f"Context window: {usage.window_label}")
+    st.caption(f"Context source: {usage.source}")
 
-        used_percentage = usage.used_percentage
-        if used_percentage is not None:
-            st.progress(usage.progress)
-            st.caption(
-                f"Estimated used: {used_percentage:.1f}% "
-                f"({usage.used_tokens:,}/{usage.window:,} tokens)"
-            )
-        else:
-            st.caption(
-                f"Estimated used: unknown ({usage.used_tokens:,} tokens so far)"
-            )
-
-        st.subheader("Spend")
-        total_col, next_col = st.columns(2)
-        total_col.metric("Total this chat", format_spend(spend.total_cost))
-        next_col.metric(
-            "Est. next prompt",
-            "N/A"
-            if spend.next_estimate is None
-            else format_spend(spend.next_estimate),
+    used_percentage = usage.used_percentage
+    if used_percentage is not None:
+        st.progress(usage.progress)
+        st.caption(
+            f"Estimated used: {used_percentage:.1f}% "
+            f"({usage.used_tokens:,}/{usage.window:,} tokens)"
         )
-        pricing = spend.pricing
-        if pricing.is_known:
-            st.caption(
-                f"{pricing.model} rates: "
-                f"\\${pricing.prompt_price * 1_000_000:,.2f} / 1M input tokens, "
-                f"\\${pricing.completion_price * 1_000_000:,.2f} / 1M output tokens"
-            )
-        else:
-            st.caption(f"Pricing unavailable for {pricing.model}")
+    else:
+        st.caption(
+            f"Estimated used: unknown ({usage.used_tokens:,} tokens so far)"
+        )
 
-        st.title("Developer Dashboard")
+    st.subheader("Spend")
+    render_spend_metrics(spend)
+    pricing = spend.pricing
+    if pricing.is_known:
+        st.caption(
+            f"{pricing.model} rates: "
+            f"\\${pricing.prompt_price * 1_000_000:,.2f} / 1M input tokens, "
+            f"\\${pricing.completion_price * 1_000_000:,.2f} / 1M output tokens"
+        )
+    else:
+        st.caption(f"Pricing unavailable for {pricing.model}")
 
-        st.subheader("Prompt Config")
-        if library.source is not None:
-            kind = "folder" if library.source.is_directory else "file"
-            st.caption(
-                f"Active source: **{library.source.label}** ({kind}) — "
-                f"{len(library.files)} markdown file(s), in this order:"
-            )
-        else:
-            st.caption("Markdown prompt files used by the chatbot")
+    st.subheader("Prompt Config")
+    if library.source is not None:
+        kind = "folder" if library.source.is_directory else "file"
+        st.caption(
+            f"Active source: **{library.source.label}** ({kind}) — "
+            f"{len(library.files)} markdown file(s), in this order:"
+        )
+    else:
+        st.caption("Markdown prompt files used by the chatbot")
+    if library.is_grounding_aware:
+        st.caption(
+            "✅ Grounding-aware: retrieved document context is injected "
+            "into this prompt."
+        )
+    for prompt_file in library.files:
+        status = "found" if prompt_file.exists else "missing"
+        st.text(f"- {prompt_file.name} ({status})")
+
+    with st.expander("Prompt Preview", expanded=False):
         for prompt_file in library.files:
-            status = "found" if prompt_file.exists else "missing"
-            st.text(f"- {prompt_file.name} ({status})")
-
-        with st.expander("Prompt Preview", expanded=False):
-            for prompt_file in library.files:
-                st.markdown(f"**{prompt_file.name}**")
-                if prompt_file.content:
-                    st.code(library.preview(prompt_file), language="markdown")
-                elif prompt_file.exists:
-                    st.code("(empty file)", language="markdown")
-                else:
-                    st.warning("File not found")
+            st.markdown(f"**{prompt_file.name}**")
+            if prompt_file.content:
+                st.code(library.preview(prompt_file), language="markdown")
+            elif prompt_file.exists:
+                st.code("(empty file)", language="markdown")
+            else:
+                st.warning("File not found")
 
 
 def render_history(messages) -> None:
@@ -149,3 +287,7 @@ def render_history(messages) -> None:
     for entry in messages:
         with st.chat_message(entry["role"]):
             st.markdown(entry["content"])
+            if entry.get("guard_unavailable"):
+                st.caption(
+                    "⚠️ Safety check was unavailable — this prompt wasn't screened."
+                )
