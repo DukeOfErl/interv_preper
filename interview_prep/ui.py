@@ -45,14 +45,12 @@ def render_prompt_selector(sources: list[PromptSource]) -> None:
     a new source triggers a rerun and the entry point rebuilds the prompt from
     it. A folder icon marks multi-file (directory) sources.
     """
-    st.subheader("Interviewer")
-
     def _label(key: str) -> str:
         source = next(s for s in sources if s.key == key)
         return f"📁 {source.label}" if source.is_directory else source.label
 
     st.selectbox(
-        "System prompt",
+        "Interviewer",
         options=[s.key for s in sources],
         format_func=_label,
         key="prompt_source_key",
@@ -69,7 +67,6 @@ def render_reasoning_selector(efforts: list[str]) -> None:
     Only call this when the active model is a reasoning model — the caller
     decides whether to show it. Bound to ``st.session_state["reasoning_effort"]``.
     """
-    st.subheader("Reasoning")
     st.selectbox(
         "Effort",
         options=efforts,
@@ -90,9 +87,8 @@ def render_document_uploader(key: str = "doc_uploader"):
     what actually got in is the Ingested Documents panel (a rejected file
     lingering in the widget would read as accepted).
     """
-    st.subheader("Documents")
     return st.file_uploader(
-        "Resume, job ad, cover letter",
+        "Documents (resume, job ad, cover letter)",
         type=UPLOAD_FILE_TYPES,
         accept_multiple_files=True,
         key=key,
@@ -202,6 +198,26 @@ def render_retrieval_panel(last_retrieval, last_query="") -> None:
             st.code(chunk.text, language="markdown")
 
 
+def render_spend_metrics(spend: ChatSpend) -> None:
+    """The two spend figures (total + next-prompt estimate); no pricing line."""
+    total_col, next_col = st.columns(2)
+    total_col.metric("Total this chat", format_spend(spend.total_cost))
+    next_col.metric(
+        "Est. next prompt",
+        "N/A" if spend.next_estimate is None else format_spend(spend.next_estimate),
+    )
+
+
+def render_context_bar(usage: ContextUsage) -> None:
+    """Compact context-window usage gauge for the Interview tab (label + bar).
+
+    The full model-context breakdown (model, window, source, percentages) lives
+    in the Developer tab; this is only the gauge, labelled above.
+    """
+    st.caption("Context window usage")
+    st.progress(usage.progress)
+
+
 def render_sidebar(
     library: PromptLibrary,
     usage: ContextUsage,
@@ -226,14 +242,7 @@ def render_sidebar(
         )
 
     st.subheader("Spend")
-    total_col, next_col = st.columns(2)
-    total_col.metric("Total this chat", format_spend(spend.total_cost))
-    next_col.metric(
-        "Est. next prompt",
-        "N/A"
-        if spend.next_estimate is None
-        else format_spend(spend.next_estimate),
-    )
+    render_spend_metrics(spend)
     pricing = spend.pricing
     if pricing.is_known:
         st.caption(

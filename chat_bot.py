@@ -53,6 +53,7 @@ from interview_prep.retrieval import (
 from interview_prep.ui import (
     warning_message,
     render_api_key_input,
+    render_context_bar,
     render_document_uploader,
     render_documents_panel,
     render_embedding_selector,
@@ -61,6 +62,7 @@ from interview_prep.ui import (
     render_reasoning_selector,
     render_retrieval_panel,
     render_sidebar,
+    render_spend_metrics,
     render_warnings_log,
 )
 
@@ -108,7 +110,6 @@ def sync_documents(api_key, container) -> DocumentIndex:
         uploaded = render_document_uploader(
             key=f"doc_uploader_{st.session_state['doc_uploader_nonce']}"
         )
-        render_embedding_selector(EMBEDDING_MODELS)
 
     docs = st.session_state["ingested_docs"]
     embedding_model = st.session_state["embedding_model"]
@@ -211,17 +212,19 @@ def main() -> None:
         ["Interview", "Developer", "Warnings"]
     )
 
-    # Render the selector first so a change is reflected on the same run. The
-    # empty slot right below it is filled with the grounding warning once the
-    # document state is known (after sync_documents) — a plain call there
-    # would render at the bottom of the tab instead.
-    with interview_tab:
-        render_prompt_selector(sources)
-        grounding_warning_slot = st.empty()
+    model = st.session_state["openai_model"]
+    # Reasoning effort is only meaningful for reasoning models, so the selector
+    # is shown (and the param sent) only when the active model supports it.
+    supports_reasoning = model_supports_reasoning(model, api_key)
+    if supports_reasoning:
+        st.session_state.setdefault("reasoning_effort", DEFAULT_REASONING_EFFORT)
+
+    # Resolve the selected source from session state (set via setdefault above);
+    # the selectbox rendered below stays bound to the same key, so changing it
+    # still reruns and is reflected on that run.
     selected = next(
         s for s in sources if s.key == st.session_state["prompt_source_key"]
     )
-
     library = PromptLibrary.from_source(selected)
     if library.is_empty:
         st.error(
@@ -230,35 +233,8 @@ def main() -> None:
         )
         st.stop()
 
-    doc_index = sync_documents(api_key, interview_tab)
-    if st.session_state["ingested_docs"] and not library.is_grounding_aware:
-        grounding_warning_slot.warning(
-            "⚠️ This prompt source is not grounding-aware — uploaded "
-            "documents will not be used."
-        )
-    # Rendered right below the drop zone so what got in is visible without
-    # scrolling; rejections go to the Warnings tab + a one-shot chat flash.
-    with interview_tab:
-        render_documents_panel(st.session_state["ingested_docs"], doc_index)
-
-    model = st.session_state["openai_model"]
     system_prompt = library.system_prompt
     messages = st.session_state["messages"]
-
-    # Reasoning effort is only meaningful for reasoning models, so the selector
-    # is shown (and the param sent) only when the active model supports it.
-    supports_reasoning = model_supports_reasoning(model, api_key)
-    reasoning_effort = None
-    if supports_reasoning:
-        st.session_state.setdefault("reasoning_effort", DEFAULT_REASONING_EFFORT)
-        with interview_tab:
-            render_reasoning_selector(REASONING_EFFORTS)
-        reasoning_effort = st.session_state["reasoning_effort"]
-
-    with warnings_tab:
-        render_warnings_log(st.session_state["warnings_log"])
-
-    st.title("Interview preparation Chatbot")
 
     usage = compute_context_usage(model, api_key, system_prompt, messages)
     pricing = get_model_pricing(model, api_key)
@@ -270,11 +246,44 @@ def main() -> None:
             turn_cost(pricing, *next_tokens) if next_tokens is not None else None
         ),
     )
+
+    # Interview tab, top → bottom: interviewer picker, effort selector just below
+    # it, the context-window usage gauge, then the spend figures (no header — the
+    # labels speak for themselves), then a slot the grounding warning fills once
+    # document state is known. All of this sits above the document drop zone.
+    reasoning_effort = None
+    with interview_tab:
+        render_prompt_selector(sources)
+        if supports_reasoning:
+            render_reasoning_selector(REASONING_EFFORTS)
+            reasoning_effort = st.session_state["reasoning_effort"]
+        render_context_bar(usage)
+        render_spend_metrics(spend)
+        grounding_warning_slot = st.empty()
+
+    # The uploader renders into the interview tab (below the above), then the
+    # ingested panel renders right under it.
+    doc_index = sync_documents(api_key, interview_tab)
+    if st.session_state["ingested_docs"] and not library.is_grounding_aware:
+        grounding_warning_slot.warning(
+            "⚠️ This prompt source is not grounding-aware — uploaded "
+            "documents will not be used."
+        )
+    with interview_tab:
+        render_documents_panel(st.session_state["ingested_docs"], doc_index)
+
     with dev_tab:
+        render_embedding_selector(EMBEDDING_MODELS)
         render_sidebar(library, usage, spend)
         render_retrieval_panel(
             st.session_state["last_retrieval"], st.session_state["last_query"]
         )
+
+    with warnings_tab:
+        render_warnings_log(st.session_state["warnings_log"])
+
+    st.title("Interview preparation Chatbot")
+
     render_history(messages)
 
     # Flash warnings render at the BOTTOM of the conversation — just above the
