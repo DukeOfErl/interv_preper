@@ -16,6 +16,13 @@ DEFAULT_MODEL = "GPT-5-Mini"
 TYPING_DELAY_SECONDS = 0.05
 MODELS_CACHE_TTL_SECONDS = 3600
 
+# Tool calling: how many times one turn may round-trip through tools before we
+# stop feeding results back. A cap is required, not defensive — the loop is
+# "call model → run tools → call model again", and a model that keeps requesting
+# tools would otherwise spin indefinitely at full token cost. Two hops is ample
+# for the single no-argument tool in ``tools.py``.
+MAX_TOOL_HOPS = 4
+
 # Reasoning effort presets, offered in the sidebar only when the active model is
 # a reasoning model. Ordered low→high; sent to OpenRouter as
 # ``reasoning.effort``. These three levels are accepted for every reasoning

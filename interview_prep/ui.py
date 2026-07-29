@@ -198,6 +198,35 @@ def render_retrieval_panel(last_retrieval, last_query="") -> None:
             st.code(chunk.text, language="markdown")
 
 
+def render_tool_failure_selector(modes) -> None:
+    """LEARNING SCAFFOLDING — pick a deliberate tool failure to observe.
+
+    Delete with this branch. Takes effect on the next message, so a mode can be
+    switched mid-interview without losing the conversation.
+    """
+    st.selectbox(
+        "Tool failure mode (debug)",
+        modes,
+        key="tool_failure_mode",
+        help=(
+            "Deliberately break the get_elapsed_time tool to see how the model "
+            "reacts. Applies to the next message you send."
+        ),
+    )
+
+
+def render_tool_calls_panel(last_tool_calls) -> None:
+    """Show the tools the model chose to call on the most recent turn."""
+    with st.expander("Last Tool Calls", expanded=False):
+        if not last_tool_calls:
+            st.caption("The model has not called a tool yet.")
+        for call in last_tool_calls:
+            st.markdown(f"**{call['name']}**")
+            st.code(call["arguments"] or "{}", language="json")
+            st.caption("returned:")
+            st.code(call["result"], language="json")
+
+
 def render_spend_metrics(spend: ChatSpend) -> None:
     """The two spend figures (total + next-prompt estimate); no pricing line."""
     total_col, next_col = st.columns(2)

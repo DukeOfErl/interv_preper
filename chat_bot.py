@@ -6,6 +6,7 @@ This module only wires together the pieces in the ``interview_prep`` package
 and drives the Streamlit chat loop.
 """
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -50,6 +51,7 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
+from interview_prep.tools import FAILURE_MODES, ToolBox
 from interview_prep.ui import (
     warning_message,
     render_api_key_input,
@@ -63,6 +65,8 @@ from interview_prep.ui import (
     render_retrieval_panel,
     render_sidebar,
     render_spend_metrics,
+    render_tool_calls_panel,
+    render_tool_failure_selector,
     render_warnings_log,
 )
 
@@ -197,6 +201,12 @@ def main() -> None:
     st.session_state.setdefault("openai_model", DEFAULT_MODEL)
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("total_cost", 0.0)
+    # Monotonic clock reading for the interview's first user message; the
+    # get_elapsed_time tool measures from here. Monotonic rather than wall-clock
+    # because only the difference is ever used, and it can't jump.
+    st.session_state.setdefault("interview_started_at", None)
+    st.session_state.setdefault("last_tool_calls", [])
+    st.session_state.setdefault("tool_failure_mode", FAILURE_MODES[0])
     st.session_state.setdefault("prompt_source_key", default_source(sources).key)
     # A stored key can go stale if a source is renamed/removed between runs;
     # reset it before the widget renders, since the selectbox requires its bound
@@ -278,6 +288,8 @@ def main() -> None:
         render_retrieval_panel(
             st.session_state["last_retrieval"], st.session_state["last_query"]
         )
+        render_tool_failure_selector(FAILURE_MODES)
+        render_tool_calls_panel(st.session_state["last_tool_calls"])
 
     with warnings_tab:
         render_warnings_log(st.session_state["warnings_log"])
@@ -348,6 +360,15 @@ def main() -> None:
         else:
             effective_prompt = system_prompt
 
+        # The interview clock starts at the first user message, so the tool
+        # measures the interview rather than how long the app has been open.
+        if st.session_state["interview_started_at"] is None:
+            st.session_state["interview_started_at"] = time.monotonic()
+        toolbox = ToolBox(
+            started_at=st.session_state["interview_started_at"],
+            failure_mode=st.session_state["tool_failure_mode"],
+        )
+
         guard = JailbreakGuard(api_key=api_key)
         llm = InterviewLLM(
             api_key=api_key, model=model, reasoning_effort=reasoning_effort
@@ -362,7 +383,9 @@ def main() -> None:
             with ThreadPoolExecutor(max_workers=1) as pool:
                 guard_future = pool.submit(guard.check, prompt)
                 try:
-                    for token in llm.stream_reply(effective_prompt, pending):
+                    for token in llm.stream_reply(
+                        effective_prompt, pending, toolbox=toolbox
+                    ):
                         reply_parts.append(token)
                         slot.markdown("".join(reply_parts))
                         # Poll (never block) the guardrail; bail the moment it
@@ -412,6 +435,7 @@ def main() -> None:
         # Allowed: accrue this turn's ACTUAL spend (OpenRouter's reported cost),
         # falling back to reported token counts × price, then rough estimates.
         assistant_reply = "".join(reply_parts)
+        st.session_state["last_tool_calls"] = llm.last_tool_calls
         cost = llm.last_cost
         if cost is None:
             pricing_now = get_model_pricing(model, api_key)
