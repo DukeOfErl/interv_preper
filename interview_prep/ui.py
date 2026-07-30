@@ -191,11 +191,45 @@ def render_retrieval_panel(last_retrieval, last_query="") -> None:
         if not last_retrieval:
             st.caption("No retrieval has run yet.")
         for chunk in last_retrieval:
+            topic = getattr(chunk, "topic", "")
             st.markdown(
-                f"**{chunk.doc_type}: {chunk.source}** "
+                f"**{chunk.doc_type}{f' — {topic}' if topic else ''}: "
+                f"{chunk.source}** "
                 f"(part {chunk.chunk_id + 1}, score {chunk.score:.3f})"
             )
             st.code(chunk.text, language="markdown")
+
+
+def render_tool_calls_panel(last_tool_calls) -> None:
+    """Show the tools the model chose to call on the most recent turn."""
+    with st.expander("Last Tool Calls", expanded=False):
+        if not last_tool_calls:
+            st.caption("The model has not called a tool yet.")
+        for call in last_tool_calls:
+            st.markdown(f"**{call['name']}**")
+            st.code(call["arguments"] or "{}", language="json")
+            st.caption("returned:")
+            st.code(call["result"], language="markdown")
+
+
+def render_web_sources_panel(citations) -> None:
+    """List the web sources behind the most recent research call.
+
+    The in-reply citation links depend on the model following its citation
+    instructions; this panel is the reliable fallback, rendered straight from
+    the provider's annotations.
+    """
+    with st.expander("Web Sources", expanded=False):
+        if not citations:
+            st.caption("No web research has run yet.")
+        for cite in citations:
+            title = cite.title or cite.url
+            st.markdown(f"[{title}]({cite.url})")
+            if cite.content:
+                excerpt = cite.content[:300]
+                if len(cite.content) > 300:
+                    excerpt += "…"
+                st.caption(excerpt)
 
 
 def render_spend_metrics(spend: ChatSpend) -> None:

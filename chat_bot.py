@@ -50,6 +50,8 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
+from interview_prep.tools import ToolBox
+from interview_prep.web_research import WebResearcher
 from interview_prep.ui import (
     warning_message,
     render_api_key_input,
@@ -63,7 +65,9 @@ from interview_prep.ui import (
     render_retrieval_panel,
     render_sidebar,
     render_spend_metrics,
+    render_tool_calls_panel,
     render_warnings_log,
+    render_web_sources_panel,
 )
 
 
@@ -197,6 +201,9 @@ def main() -> None:
     st.session_state.setdefault("openai_model", DEFAULT_MODEL)
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("total_cost", 0.0)
+    st.session_state.setdefault("last_tool_calls", [])
+    st.session_state.setdefault("web_sources", [])
+    st.session_state.setdefault("web_research_cache", {})
     st.session_state.setdefault("prompt_source_key", default_source(sources).key)
     # A stored key can go stale if a source is renamed/removed between runs;
     # reset it before the widget renders, since the selectbox requires its bound
@@ -271,6 +278,7 @@ def main() -> None:
         )
     with interview_tab:
         render_documents_panel(st.session_state["ingested_docs"], doc_index)
+        render_web_sources_panel(st.session_state["web_sources"])
 
     with dev_tab:
         render_embedding_selector(EMBEDDING_MODELS)
@@ -278,6 +286,7 @@ def main() -> None:
         render_retrieval_panel(
             st.session_state["last_retrieval"], st.session_state["last_query"]
         )
+        render_tool_calls_panel(st.session_state["last_tool_calls"])
 
     with warnings_tab:
         render_warnings_log(st.session_state["warnings_log"])
@@ -359,10 +368,44 @@ def main() -> None:
 
         with st.chat_message("assistant"):
             slot = st.empty()
+
+            # Tools are offered only to grounding-aware sources: the research
+            # tool indexes its raw excerpts for retrieval, which presumes the
+            # RAG pipeline the source opted into.
+            toolbox = None
+            if library.is_grounding_aware:
+
+                def show_progress(message):
+                    # A research hop streams no tokens for many seconds; keep
+                    # the slot alive with a status line appended to whatever
+                    # has already streamed.
+                    streamed = "".join(reply_parts)
+                    slot.markdown(f"{streamed}\n\n*{message}*" if streamed else f"*{message}*")
+
+                def register_document(doc):
+                    # Mirror sync_documents' replace-on-same-name semantics so
+                    # the Documents panel and embedding-switch re-embeds see
+                    # research documents like any upload.
+                    docs = st.session_state["ingested_docs"]
+                    docs[:] = [d for d in docs if d.name != doc.name]
+                    docs.append(doc)
+
+                toolbox = ToolBox(
+                    researcher=WebResearcher(api_key=api_key),
+                    guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
+                    index=doc_index,
+                    cache=st.session_state["web_research_cache"],
+                    on_warning=record_warning,
+                    on_progress=show_progress,
+                    on_document=register_document,
+                )
+
             with ThreadPoolExecutor(max_workers=1) as pool:
                 guard_future = pool.submit(guard.check, prompt)
                 try:
-                    for token in llm.stream_reply(effective_prompt, pending):
+                    for token in llm.stream_reply(
+                        effective_prompt, pending, toolbox=toolbox
+                    ):
                         reply_parts.append(token)
                         slot.markdown("".join(reply_parts))
                         # Poll (never block) the guardrail; bail the moment it
@@ -412,6 +455,9 @@ def main() -> None:
         # Allowed: accrue this turn's ACTUAL spend (OpenRouter's reported cost),
         # falling back to reported token counts × price, then rough estimates.
         assistant_reply = "".join(reply_parts)
+        st.session_state["last_tool_calls"] = llm.last_tool_calls
+        if toolbox is not None and toolbox.citations:
+            st.session_state["web_sources"] = list(toolbox.citations)
         cost = llm.last_cost
         if cost is None:
             pricing_now = get_model_pricing(model, api_key)
@@ -427,6 +473,10 @@ def main() -> None:
                     estimate_prompt_tokens(effective_prompt, pending),
                     estimate_text_tokens(assistant_reply),
                 )
+        # Tool sub-completions (web research) bill separately from the main
+        # stream's usage chunks; the toolbox accumulated their reported cost.
+        if toolbox is not None:
+            cost += toolbox.extra_cost
         st.session_state["total_cost"] += cost
 
         # Record the reasoning tokens this turn spent so the next-prompt estimate

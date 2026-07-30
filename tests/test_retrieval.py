@@ -99,6 +99,26 @@ def test_format_context_block_shape():
     assert "### resume: resume.txt (part 2)\nMore." in block
 
 
+def test_format_context_block_web_chunk_carries_topic_label():
+    block = format_context_block(
+        [
+            make_chunk(),
+            make_chunk(
+                source="web: Acme Corp news",
+                doc_type="web search",
+                topic="company research",
+                text="Acme raised $40M.",
+            ),
+        ]
+    )
+    # Uploads keep the plain header; web chunks splice in their topic.
+    assert "### resume: resume.txt (part 1)" in block
+    assert (
+        "### web search — company research: web: Acme Corp news (part 1)\n"
+        "Acme raised $40M." in block
+    )
+
+
 def test_format_context_block_empty():
     assert format_context_block([]) == ""
 

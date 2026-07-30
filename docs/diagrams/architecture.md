@@ -7,7 +7,7 @@
 > Diagrams here follow the principles in [`DIAGRAMS.md`](DIAGRAMS.md): one story
 > per diagram, sequence diagrams for temporal flows, ~7±2 boxes each.
 
-Three views, from most dynamic to most static. Shared conventions: **dotted
+Four views, from most dynamic to most static. Shared conventions: **dotted
 arrows** = network calls to OpenRouter, **solid arrows** = in-process;
 **orange** = external API, **blue** = markdown prompt files.
 
@@ -50,7 +50,42 @@ Key points: retrieval happens *before* the stream; the guardrail runs
 *concurrently with* the stream and is polled between tokens; the sidebar
 refreshes only on the rerun after the turn completes.
 
-## 2. Document ingestion
+## 2. A web-research turn
+
+*What happens when the user asks the interviewer to research something?* (The
+guardrail-vs-stream concurrency and the persist/rerun ending are as in
+diagram 1 — this diagram tells only the tool story.)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant L as InterviewLLM<br/>(llm.py)
+    participant T as ToolBox<br/>(tools.py)
+    participant W as WebResearcher<br/>(web_research.py)
+    participant G as JailbreakGuard<br/>(guardrails.py)
+    participant R as DocumentIndex<br/>(retrieval.py)
+
+    U->>L: "please research Acme Corp"
+    L-->>L: hop 1 (OpenRouter, stream) →<br/>tool call, no text
+    L->>T: run web_research(query, topic)
+    T->>W: research(query)
+    W-->>W: sub-completion with web plugin<br/>(OpenRouter, quarantined model)
+    W->>T: cited bullets + raw excerpts
+    T->>G: scan bullets (fails closed)
+    T->>G: scan raw excerpts (fails closed)
+    T->>R: index excerpts as "web search" doc<br/>(topic = provenance)
+    T->>L: bullets (or error string)
+    L-->>L: hop 2 (OpenRouter, stream)
+    L->>U: cited reply, typewriter-style
+```
+
+Key points: the interviewer never sees raw web pages — only the sub-call's
+screened bullets (dual-LLM quarantine; ADR-0100); both scans fail **closed**
+like document ingestion; the indexed excerpts let diagram 1's retrieval serve
+follow-up turns without a new search.
+
+## 3. Document ingestion
 
 *What happens when the user drops a file into the sidebar?*
 
@@ -71,10 +106,10 @@ Note the polarity: this scan **fails closed** per document (no clean scan → no
 ingestion), the opposite of the per-turn chat guardrail, which fails open so a
 classifier outage never blocks the conversation.
 
-## 3. Module map
+## 4. Module map
 
 *What are the parts, and what depends on what?* Static structure only — no
-runtime edges (those are diagrams 1 and 2).
+runtime edges (those are diagrams 1–3).
 
 ```mermaid
 flowchart TB
@@ -86,6 +121,7 @@ flowchart TB
         rag["document RAG<br/>ingest.py · retrieval.py"]
         safety["guardrail<br/>guardrails.py"]
         llmC["LLM + accounting<br/>llm.py · pricing.py · context.py"]
+        toolsC["tools<br/>tools.py · web_research.py"]
         uiC["rendering<br/>ui.py"]
     end
 
@@ -96,9 +132,11 @@ flowchart TB
     entry --> pkg
     promptsC --> mdfiles
     safety --> mdfiles
+    toolsC --> mdfiles
     rag -.-> orouter
     safety -.-> orouter
     llmC -.-> orouter
+    toolsC -.-> orouter
     evals --> promptsC
     evals -.-> orouter
 

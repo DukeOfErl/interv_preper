@@ -116,7 +116,9 @@ uv run pytest path/to/test.py::name  # run a single test
 - `config.py` — constants, paths (`PROMPTS_DIR`, `DEFAULT_PROMPT_SOURCE`, `IGNORE_TAG`, `DEFAULT_MODEL`), and `load_api_key()`
 - `prompts.py` — `PromptSource` / `PromptLibrary` / `PromptFile`: discover, load, and compose the markdown prompt
 - `context.py` — token estimation + `get_model_context_window()`; `compute_context_usage()` returns a `ContextUsage`
-- `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens
+- `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens; with a `toolbox` it becomes the tool-calling loop (stream → run tools → stream again, capped by `MAX_TOOL_HOPS`, cost accumulated across hops)
+- `tools.py` — `ToolBox`: tool schemas + dispatcher (`run()` never raises — failures return error strings). One tool: `web_research(query, topic)`, consent-gated in its description
+- `web_research.py` — `WebResearcher`: quarantined sub-completion over OpenRouter's `web` plugin; returns cited bullets + verbatim excerpts; citation links validated in code (ADR-0100)
 - `ingest.py` — `parse_document()` (PDF/DOCX/TXT/MD → text), `infer_doc_type()`, `should_ingest()` (the fail-closed screening policy)
 - `retrieval.py` — `DocumentIndex` (LangChain `InMemoryVectorStore` + `OpenAIEmbeddings` via OpenRouter), `format_context_block()` / `fill_retrieved_context()` (the context-block contract)
 - `query_rewrite.py` — `QueryCondenser`: rewrites a follow-up message into a standalone retrieval query (fails open)
@@ -141,7 +143,7 @@ The default source, `prompts/multi-role interviewer/`, holds the staged prompts:
 - `30_mock_interview.md` — Phase 2 (conducting the interview)
 - `40_feedback_stage.md` — Phase 3 (per-answer scoring rubric)
 
-**Grounding contract (must not break).** A prompt source **opts into** document RAG by containing the `{retrieved_context}` placeholder (`PromptLibrary.is_grounding_aware`); sources without it behave as if RAG didn't exist. The retrieved block is substituted with **`str.replace`, never `str.format`** — the other `{placeholders}` in the markdown are the model's to fill conversationally and must survive. `format_context_block()` in `retrieval.py` is the single definition of that block's shape; persona markdown is written against it.
+**Grounding contract (must not break).** A prompt source **opts into** document RAG by containing the `{retrieved_context}` placeholder (`PromptLibrary.is_grounding_aware`); sources without it behave as if RAG didn't exist (and are offered no tools). The retrieved block is substituted with **`str.replace`, never `str.format`** — the other `{placeholders}` in the markdown are the model's to fill conversationally and must survive. `format_context_block()` in `retrieval.py` is the single definition of that block's shape (including the `### web search — <topic>: …` provenance header for web-research chunks); persona markdown is written against it.
 
 **Subsystem behavior & rationale live in the docs, not here** (so this file stays lean and the detail stays in one canonical place):
 

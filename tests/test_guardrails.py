@@ -104,6 +104,30 @@ def test_check_document_short_text_is_single_window():
     assert len(guard._client.chat.completions.calls) == 1
 
 
+def test_check_document_default_kind_uses_upload_framing():
+    guard = make_guard(content='{"is_jailbreak": false}')
+    guard.check_document("some resume text")
+    sent = guard._client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "document the user uploaded" in sent
+    assert "web page" not in sent
+
+
+def test_check_document_web_kind_uses_web_framing():
+    guard = make_guard(content='{"is_jailbreak": false}')
+    guard.check_document("some page text", kind="web")
+    sent = guard._client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "web page" in sent
+    # The web frame calibrates what benign looks like on a page.
+    assert "marketing" in sent
+
+
+def test_check_document_unknown_kind_falls_back_to_upload_framing():
+    guard = make_guard(content='{"is_jailbreak": false}')
+    guard.check_document("text", kind="mystery")
+    sent = guard._client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "document the user uploaded" in sent
+
+
 def test_check_sends_instructions_and_prompt():
     guard = make_guard(content='{"is_jailbreak": false}')
     guard.check("my prompt")

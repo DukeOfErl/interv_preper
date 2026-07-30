@@ -16,6 +16,40 @@ DEFAULT_MODEL = "GPT-5-Mini"
 TYPING_DELAY_SECONDS = 0.05
 MODELS_CACHE_TTL_SECONDS = 3600
 
+# Tool calling: how many times one turn may round-trip through tools before we
+# stop feeding results back. A cap is required, not defensive — the loop is
+# "call model → run tools → call model again", and a model that keeps requesting
+# tools (e.g. retrying a failing one) would otherwise spin indefinitely at full
+# token cost. On the final hop the tools are withheld, forcing a text answer.
+MAX_TOOL_HOPS = 4
+
+# --- Web research tool ----------------------------------------------------------
+#
+# The interviewer can call a ``web_research(query, topic)`` tool. It runs as a
+# SUB-COMPLETION: a separate, non-streamed OpenRouter call on a cheap model with
+# OpenRouter's ``web`` plugin attached (there is no bare search endpoint — the
+# plugin only exists as a modifier on chat completions). That sub-call reads the
+# raw pages and returns extracted fact bullets with citations; the interviewer
+# never sees unprocessed web text (the dual-LLM / quarantined-model pattern).
+# The raw excerpts are additionally indexed for RAG after a fail-closed
+# guardrail scan, so later turns can retrieve fuller detail without a new
+# search.
+WEB_RESEARCH_MODEL = "openai/gpt-4.1-mini"
+WEB_RESEARCH_PROMPT_FILE = "web_research.ignore.md"
+WEB_SEARCH_MAX_RESULTS = 5
+# Explicit engine choice; "exa" works with any chat model (OpenRouter injects
+# results server-side), unlike "native" which needs provider search support.
+WEB_SEARCH_ENGINE = "exa"
+# Why the model is searching, supplied by the model per call and shown later as
+# the label on retrieved web excerpts (provenance for the grounding prompt).
+WEB_TOPICS = [
+    "company research",
+    "role & interview questions",
+    "technical reference",
+    "interview best practices",
+    "other",
+]
+
 # Reasoning effort presets, offered in the sidebar only when the active model is
 # a reasoning model. Ordered low→high; sent to OpenRouter as
 # ``reasoning.effort``. These three levels are accepted for every reasoning
@@ -68,7 +102,7 @@ CHUNK_SIZE_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 150
 TOP_K = 6
 RETRIEVED_CONTEXT_PLACEHOLDER = "{retrieved_context}"
-DOCUMENT_TYPES = ["resume", "job ad", "cover letter", "other"]
+DOCUMENT_TYPES = ["resume", "job ad", "cover letter", "web search", "other"]
 UPLOAD_FILE_TYPES = ["pdf", "docx", "txt", "md"]
 
 # Before retrieval on a follow-up turn, a small model rewrites the user's

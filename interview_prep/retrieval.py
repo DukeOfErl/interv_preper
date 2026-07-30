@@ -37,6 +37,7 @@ class RetrievedChunk:
     doc_type: str
     chunk_id: int
     score: float
+    topic: str = ""  # why a web-research document was fetched; "" for uploads
 
 
 class DocumentIndex:
@@ -71,7 +72,12 @@ class DocumentIndex:
         self.remove_document(doc.name)
         chunks = self._splitter.split_text(doc.text)
         metadatas = [
-            {"source": doc.name, "doc_type": doc.doc_type, "chunk_id": i}
+            {
+                "source": doc.name,
+                "doc_type": doc.doc_type,
+                "chunk_id": i,
+                "topic": getattr(doc, "topic", ""),
+            }
             for i in range(len(chunks))
         ]
         ids = self._store.add_texts(chunks, metadatas=metadatas)
@@ -102,6 +108,7 @@ class DocumentIndex:
                 doc_type=document.metadata.get("doc_type", "other"),
                 chunk_id=int(document.metadata.get("chunk_id", 0)),
                 score=float(score),
+                topic=document.metadata.get("topic", ""),
             )
             for document, score in results
         ]
@@ -111,18 +118,20 @@ def format_context_block(chunks: list[RetrievedChunk]) -> str:
     """Render retrieved chunks as the labeled block personas are written against.
 
     This is the single definition of the context-block contract: a header, then
-    one ``### <doc_type>: <name> (part N)`` section per chunk. Returns "" when
-    nothing was retrieved.
+    one ``### <doc_type>: <name> (part N)`` section per chunk — with the topic
+    spliced in as ``### <doc_type> — <topic>: <name> (part N)`` for chunks that
+    carry one (web research). Returns "" when nothing was retrieved.
     """
     if not chunks:
         return ""
     sections = [
-        f"### {c.doc_type}: {c.source} (part {c.chunk_id + 1})\n{c.text}"
+        f"### {c.doc_type}{f' — {c.topic}' if c.topic else ''}: "
+        f"{c.source} (part {c.chunk_id + 1})\n{c.text}"
         for c in chunks
     ]
     return (
         "The following excerpts were retrieved from the candidate's uploaded "
-        "documents:\n\n" + "\n\n".join(sections)
+        "documents and from prior web research:\n\n" + "\n\n".join(sections)
     )
 
 

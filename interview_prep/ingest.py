@@ -25,12 +25,15 @@ class IngestedDocument:
 
     ``doc_type`` is mutable: the user can correct the inferred type from the
     ingestion panel. ``n_chunks`` is filled in once the document is indexed.
+    ``topic`` is provenance for web-research documents (why the search was
+    run, supplied by the model at call time); empty for uploads.
     """
 
     name: str
     doc_type: str
     text: str
     n_chunks: int = 0
+    topic: str = ""
 
     @property
     def token_estimate(self) -> int:
