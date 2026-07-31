@@ -219,7 +219,7 @@ def render_web_sources_panel(citations) -> None:
     instructions; this panel is the reliable fallback, rendered straight from
     the provider's annotations.
     """
-    with st.expander("Web Sources", expanded=False):
+    with st.expander("Last Web Sources", expanded=False):
         if not citations:
             st.caption("No web research has run yet.")
         for cite in citations:

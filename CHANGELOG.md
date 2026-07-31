@@ -4,8 +4,15 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project aims to follow it going forward. Dates are ISO 8601 (YYYY-MM-DD).
+Versions are git tags (`vX.Y.Z`) using [semver](https://semver.org/)'s
+pre-release convention: `0.y.z` while the app's shape may still change with
+any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
+
+Accumulates the work in progress toward **0.2.0** (document RAG and web
+research); these entries move under a `## [0.2.0]` heading when that work is
+complete and tagged.
 
 ### Added
 - Web research on request: the interviewer can call a `web_research` tool
@@ -34,6 +41,10 @@ and the project aims to follow it going forward. Dates are ISO 8601 (YYYY-MM-DD)
   Records (`docs/decisions/`), and this changelog.
 
 ### Changed
+- At the end of intake, the interviewer now offers (in one sentence) to
+  research the role on the web — the company, current technologies, or
+  anything else the user finds useful. The offer does not relax the consent
+  rules: a search still runs only if the user says yes or asks for one.
 - The safety classifier's scope broadened from jailbreak detection to
   injection/manipulation generally (AI-directed instructions inside documents
   and web pages, tool-usage manipulation, rubric overrides), with framing per
@@ -48,3 +59,25 @@ and the project aims to follow it going forward. Dates are ISO 8601 (YYYY-MM-DD)
   Warnings tab.
 - Project docs reorganized: `REQUIREMENTS.md` and the architecture diagrams
   moved under `docs/`.
+
+## [0.1.0] - 2026-07-14
+
+The first complete version of the app, tagged just before the RAG work began
+(git tag `v0.1.0`).
+
+### Added
+- Streamlit mock-interview chatbot over OpenRouter (OpenAI SDK), streaming
+  replies with a typewriter effect and a fail-fast API-key check (`.env` or
+  sidebar input, with friendly auth-error handling).
+- System prompt composed from markdown files in `prompts/`, with automatic
+  source discovery and a sidebar selector: single-file personas or folders
+  concatenated in numeric-prefix order; the staged multi-role interviewer
+  (intake → mock interview → per-answer feedback) as the default.
+- Pre-send jailbreak guardrail: a small classifier screens each user prompt
+  before it reaches the interviewer (fails open).
+- Reasoning-effort selector, shown only for reasoning models.
+- Per-chat cost tracking with a next-prompt estimate, and a context-window
+  usage gauge, in the sidebar.
+- DeepEval prompt-evaluation package (`evals/`, standalone): scores the real
+  composed prompt against interview scenarios with LLM-as-a-judge metrics.
+- Pytest suite; architecture diagram linked from the README.
