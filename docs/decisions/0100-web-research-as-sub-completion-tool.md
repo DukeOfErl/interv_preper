@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-07-30
-- **Pull request:** (branch `feat/web-research-tool`)
+- **Pull request:** #4
 
 ## Context
 
