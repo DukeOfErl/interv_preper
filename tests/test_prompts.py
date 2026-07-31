@@ -40,6 +40,20 @@ def test_is_empty_when_no_content(tmp_path):
     assert library.system_prompt == ""
 
 
+def test_is_grounding_aware_detects_placeholder(tmp_path):
+    _write(tmp_path, "grounded.md", "Use these:\n\n{retrieved_context}")
+    library = PromptLibrary.load(prompt_dir=tmp_path, file_names=["grounded.md"])
+    assert library.is_grounding_aware
+
+
+def test_is_grounding_aware_false_for_other_placeholders(tmp_path):
+    # Other {placeholders} are the model's to fill; only {retrieved_context}
+    # opts a source into document grounding.
+    _write(tmp_path, "plain.md", "Role: {target_role}")
+    library = PromptLibrary.load(prompt_dir=tmp_path, file_names=["plain.md"])
+    assert not library.is_grounding_aware
+
+
 def test_preview_truncates_to_max_lines(tmp_path):
     _write(tmp_path, "long.md", "\n".join(f"line{i}" for i in range(20)))
     library = PromptLibrary.load(prompt_dir=tmp_path, file_names=["long.md"])

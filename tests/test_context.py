@@ -70,6 +70,20 @@ def test_predict_next_call_uses_average_lengths():
     assert output_tokens == 20  # avg assistant length
 
 
+def test_predict_next_call_adds_average_reasoning_tokens():
+    # Same visible content as above (avg assistant length = 20), but the turns
+    # also spent reasoning tokens (30 and 90; avg = 60), billed as output.
+    messages = [
+        {"role": "user", "content": "a" * 40},
+        {"role": "assistant", "content": "b" * 40, "reasoning_tokens": 30},
+        {"role": "user", "content": "a" * 80},
+        {"role": "assistant", "content": "b" * 120, "reasoning_tokens": 90},
+    ]
+    _, output_tokens = predict_next_call_tokens("sys", messages)
+
+    assert output_tokens == 20 + 60  # avg visible length + avg reasoning tokens
+
+
 # --- model context window ---------------------------------------------------
 
 

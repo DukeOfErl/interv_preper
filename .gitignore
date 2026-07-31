@@ -16,3 +16,25 @@ htmlcov/
 
 # Local secrets
 .env
+
+# Editor / IDE (no trailing slash: these appear as /dev/null device nodes
+# under WSL, not real directories, so a dir-only pattern would miss them)
+.idea
+.vscode
+
+# Tooling / agent local state
+.claude/
+.mcp.json
+.ripgreprc
+.gitmodules
+
+# Shell / user dotfiles that ended up in the tree
+.bashrc
+.bash_profile
+.profile
+.zshrc
+.zprofile
+.gitconfig
+
+# Local-only developer files (fixtures, scratch, notes) — never committed
+dev_local/
