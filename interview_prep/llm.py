@@ -2,11 +2,43 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from openai import OpenAI
 
 from .config import MAX_TOOL_HOPS, OPENROUTER_BASE_URL, TYPING_DELAY_SECONDS
+
+# A brace-delimited object literal, and the quoted keys inside one.
+_JSON_OBJECT_RE = re.compile(r"\{[^{}]{0,800}\}", re.DOTALL)
+_JSON_KEY_RE = re.compile(r'"(\w+)"\s*:')
+# Enough keys that an ordinary sentence containing braces cannot qualify.
+_MIN_TYPED_CALL_KEYS = 3
+
+
+def looks_like_typed_tool_call(text, specs):
+    """True when a reply contains a tool call written out as prose.
+
+    Deliberately narrow: an object literal is only read as a typed tool call
+    when it has at least ``_MIN_TYPED_CALL_KEYS`` keys and *every* key is a
+    parameter of a tool the model was offered. A reply that merely discusses
+    JSON, or shows a two-field example, does not qualify — the cost of a false
+    positive is a wasted hop and a re-answer.
+    """
+    if not text or "{" not in text:
+        return False
+    parameters = set()
+    for spec in specs or []:
+        function = spec.get("function") or {}
+        schema = function.get("parameters") or {}
+        parameters |= set(schema.get("properties") or {})
+    if not parameters:
+        return False
+    for blob in _JSON_OBJECT_RE.findall(text):
+        keys = set(_JSON_KEY_RE.findall(blob))
+        if len(keys) >= _MIN_TYPED_CALL_KEYS and keys <= parameters:
+            return True
+    return False
 
 
 class InterviewLLM:
@@ -41,6 +73,12 @@ class InterviewLLM:
         self.last_cost = None
         self.last_reasoning_tokens = None
         self.last_tool_calls = []
+        #   answer_text — the reply minus preamble from tool-calling hops
+        self.answer_text = ""
+        #   typed_tool_call_retries — hops that wrote a tool call as prose
+        #   answered — whether a hop produced the final answer (it may be "")
+        self.typed_tool_call_retries = 0
+        self.answered = False
 
     def stream_reply(self, system_prompt, messages, toolbox=None):
         """Yield the assistant reply token-by-token (for a typewriter effect).
@@ -53,11 +91,20 @@ class InterviewLLM:
 
         Bounded by ``MAX_TOOL_HOPS``. On the final hop the tools are withheld,
         which forces a text answer rather than truncating mid-loop.
+
+        Everything is yielded as it arrives, so a hop that talks before calling
+        a tool ("let me look that up") shows immediately. But such text is
+        PREAMBLE, not the answer, and a model sometimes emits tool-call JSON
+        there instead of prose — so ``answer_text`` accumulates only the text of
+        hops that requested no tools. Callers persist that, not the raw stream.
         """
         self.last_usage = None
         self.last_cost = None
         self.last_reasoning_tokens = None
         self.last_tool_calls = []
+        self.answer_text = ""
+        self.typed_tool_call_retries = 0
+        self.answered = False
         chat_messages = [
             {"role": "system", "content": system_prompt},
             *[{"role": m["role"], "content": m["content"]} for m in messages],
@@ -65,10 +112,48 @@ class InterviewLLM:
 
         for hop in range(MAX_TOOL_HOPS):
             offer_tools = toolbox is not None and hop < MAX_TOOL_HOPS - 1
+            if toolbox is not None and not offer_tools:
+                # Last hop: the answer is about to be forced with no tools
+                # left. Let the toolbox state what the turn failed to obtain,
+                # so an honest "I couldn't read it" beats inventing one.
+                note = toolbox.final_hop_note()
+                if note:
+                    chat_messages.append({"role": "system", "content": note})
             text, tool_calls = yield from self._stream_once(
                 chat_messages, toolbox if offer_tools else None
             )
+            if not offer_tools:
+                # Tools were withheld (final hop, or no toolbox at all), so
+                # this text is the answer — even when empty. Any tool_calls a
+                # provider still echoes are ignored deliberately: running one
+                # would bill a call whose result no later hop could read.
+                self.answer_text += text
+                self.answered = True
+                return
             if not tool_calls:
+                # A model sometimes *types* a tool call instead of making one.
+                # The hop then looks like a finished answer, so the loop would
+                # end and that JSON would become the reply. Correct it and let
+                # it try again while hops remain.
+                if looks_like_typed_tool_call(text, toolbox.specs):
+                    self.typed_tool_call_retries += 1
+                    chat_messages.append({"role": "assistant", "content": text})
+                    chat_messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "SYSTEM NOTE: that reply contained a tool call "
+                                "written as text. Text is never delivered to a "
+                                "tool. Request the tool properly through the "
+                                "tool interface, or, if you do not need one, "
+                                "answer the candidate in plain prose with no "
+                                "JSON."
+                            ),
+                        }
+                    )
+                    continue
+                self.answer_text += text
+                self.answered = True
                 return
             # The assistant's tool-request message must be replayed verbatim —
             # every tool result is matched to it by tool_call_id, and the API

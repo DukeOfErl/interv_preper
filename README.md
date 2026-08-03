@@ -21,6 +21,7 @@ The interviewer's behavior is defined entirely in the markdown prompt files unde
 - A prompt that contains the **`{retrieved_context}` placeholder** is *grounding-aware*: excerpts retrieved from the uploaded documents are injected there each turn. Prompts without it simply ignore uploaded documents (the sidebar says so).
 
 Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `knowledgebase`, `query_rewrite`, `tools`, `web_research`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `tools`, `web_research`, `github_mcp`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
 
 ## Documents (RAG)
 
@@ -52,6 +53,17 @@ The content is authored as markdown files in `knowledgebase/`, each with a small
 Every scored answer also lands as a structured **evaluation card** in the sidebar's **Evaluations** tab: the question, its type (behavioral/technical), and the six rubric scores (relevance, structure, specificity, evidence, judgment, communication) stay visible at a glance, while the verbal feedback folds away under an expander so several cards can be compared at once. A summary row at the top shows your per-dimension averages across the interview so far — computed from the cards, so it always agrees with them.
 
 Under the hood the interviewer records each card by calling a `record_evaluation` tool with the same scores it states in the chat (grounding-aware interviewers only). If a feedback reply ever arrives without its card, a warning appears in the Warnings tab. Cards live for the browser session; comparing across interviews (which needs saving to disk) is planned separately.
+## GitHub portfolio deep-dive
+
+Share your GitHub username and the interviewer can look at your public repositories — read a project's README and code, then ask grounded interview questions about *your* actual work (grounding-aware interviewers only, and only with your consent: it offers, and browses only after you share a username or say yes).
+
+Under the hood this is an [MCP](https://modelcontextprotocol.io) (Model Context Protocol) integration: instead of a hand-written tool, the app is an MCP *client* of the official GitHub remote MCP server — it discovers the server's tools at runtime and forwards a curated read-only subset (repo search, file reading) to the interviewer, relaying each call. Requires a GitHub personal access token (`GITHUB_PAT`, see Setup); without one the feature simply isn't offered. Calls appear in the **Last Tool Calls** panel like any other tool.
+
+Repository files are handled like uploaded documents rather than pasted into the conversation: each file is screened by the safety guardrail, indexed for retrieval (it appears in **Ingested Documents** as type *github*), and passed to the interviewer as a bounded excerpt, so a long file informs later questions through retrieval instead of filling the context window.
+
+**Set Reasoning → Effort to high for deep-dives.** Reading a repository is a multi-step tool workflow — decide what to open, list it, read a file, decide again — and reasoning effort is what buys that discipline. At lower effort the interviewer tends to guess plausible file names instead of looking them up, and to narrate tool calls instead of making them. The app reminds you once per session if you run a deep-dive below high effort. (Choosing a more capable model helps too, and model selection is planned.)
+
+Because a model that fails to read a repo can invent a plausible one, the app also **checks the interviewer's claims**: every file path and identifier the tools really returned is remembered, and if a reply names a file or function that never appeared, you get a warning in the chat and in the Warnings tab telling you to treat that part as possibly invented. See ADR-0130 for the reasoning and the limits.
 
 ## Setup
 
@@ -63,6 +75,8 @@ uv sync
 ```
 
 The `.env` file is gitignored and loaded automatically at startup. Alternatively, export `OPENROUTER_API_KEY` in your shell. In production, use your host's secrets manager rather than a file.
+
+Optionally, set `GITHUB_PAT` in the same `.env` to enable the GitHub portfolio deep-dive: create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens) with read-only access to public repositories. Without it, the app runs normally minus that feature.
 
 ## Run
 

@@ -14,6 +14,30 @@ Accumulates the work in progress toward **0.2.0** (document RAG and web
 research); these entries move under a `## [0.2.0]` heading when that work is
 complete and tagged.
 
+### Fixed
+- A tool call the model writes out as text no longer ends the turn as if it
+  were an answer: the loop recognises it, tells the model that text is never
+  delivered to a tool, and retries while hops remain.
+- File paths in warnings are rendered as code rather than bold, so a name like
+  `src/pkg/__init__.py` keeps its underscores instead of being displayed as a
+  different file.
+- The interviewer stays an interviewer during a portfolio deep-dive: it turns
+  what it reads into questions instead of delivering a code review, a list of
+  improvements, or a patch, and no longer offers a menu of things it could do
+  next. Quoting the candidate's code to anchor a question is still expected.
+- The interviewer no longer runs out of tool calls mid-exploration and acts out
+  the rest: the per-turn budget of tool rounds was sized for a single web
+  search, too few for a repository deep-dive (find the repo, list directories,
+  read files, plus the usual wasted guess), so it has been raised. When the
+  budget does run out, the forced answer is now told that no calls remain,
+  which files it actually read, and not to write tool calls or imagined
+  results. Code blocks it presents as the candidate's are also checked verbatim
+  against the files actually fetched, and flagged when they match nothing.
+- The interviewer's narration of its own tool use no longer lands in the
+  transcript: text a model emits before calling a tool (sometimes raw tool-call
+  JSON rather than prose) is streamed for responsiveness but excluded from the
+  stored reply, which is repainted when the turn ends.
+
 ### Added
 - Curated knowledge base: coach-side reference material (interview best
   practices, question banks tagged by role/seniority, legal guidelines on
@@ -29,6 +53,25 @@ complete and tagged.
   sidebar tab — scores always visible, verbal feedback folded, with
   per-dimension averages across the interview computed at the top. A feedback
   reply that skips its card raises a warning. Session-scoped. (ADR-0120)
+- GitHub portfolio deep-dive via MCP: the app can act as a Model Context
+  Protocol client of the official GitHub remote MCP server — it discovers the
+  server's tools at runtime, forwards a curated read-only allowlist (repo
+  search, file reading) to the interviewer, and relays each call, so the
+  interviewer can browse the candidate's public repos (consent-gated, like web
+  research) and ask grounded questions about their real projects. Requires an
+  optional `GITHUB_PAT`; without it the app is unchanged. Fetched files are
+  screened fail-closed and indexed like uploaded documents (type *github*,
+  named `<owner>/<repo>/<path>`), reaching the interviewer as a bounded
+  excerpt rather than filling the conversation. (ADR-0130)
+- Guidance for repository deep-dives: after a turn that used the GitHub tools
+  at less than high reasoning effort, the app shows a one-shot tip pointing at
+  the effort control, since a multi-step tool workflow degrades markedly below
+  it (and notes that model selection is planned).
+- Fabrication check for repository claims: every path and identifier the GitHub
+  tools actually returned is remembered per session, and a reply naming a file
+  or function that never appeared raises a warning in the chat and in the
+  Warnings tab. Added after a live session in which the interviewer invented a
+  whole repository from its name when its reads had failed. (ADR-0130)
 - Web research on request: the interviewer can call a `web_research` tool
   (consent-gated — only when the user asks or agrees to an offer) that runs a
   quarantined sub-completion over OpenRouter's web-search plugin and returns

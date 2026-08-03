@@ -8,8 +8,8 @@ A *tool* is two things kept deliberately separate:
   2. a **local implementation** the model never sees, invoked by ``ToolBox.run``
      with the arguments the model produced.
 
-Two tools, with opposite invocation policies (policy lives per-tool, in the
-description — never in the loop):
+Two *local* tools, with opposite invocation policies (policy lives per-tool, in
+the description — never in the loop):
 
 * ``web_research(query, topic)`` — CONSENT-GATED: only on the user's explicit
   request. Its ``run`` flow is the security-relevant part (see
@@ -20,6 +20,12 @@ description — never in the loop):
   action but a structured-output channel: the card the model would otherwise
   only state as prose is captured as data for the Evaluations tab. No consent,
   no guardrail scan (the content is the model's own output, not external).
+
+A ``ToolBox`` may additionally carry MCP tools (``github_mcp.GitHubMCP``):
+their schemas are discovered from the remote server rather than written here,
+and ``run`` relays their calls. A fetched repository file takes the same
+two-tier route as web research — screened fail-closed, indexed for retrieval,
+returned only as a bounded excerpt.
 
 ``run`` never raises. A model inventing arguments, a failing search, or a
 flagged result all come back as error strings the model can read and recover
@@ -36,6 +42,7 @@ from .config import (
     EVALUATION_DIMENSIONS,
     EVALUATION_SCORE_MAX,
     EVALUATION_SCORE_MIN,
+    GITHUB_FILE_INLINE_CHARS,
     QUESTION_TYPES,
     WEB_TOPICS,
 )
@@ -90,7 +97,25 @@ class ToolBox:
         on_warning=None,
         on_progress=None,
         on_document=None,
+        mcp=None,
+        seen_terms=None,
+        code_corpus=None,
     ):
+        # Optional MCP client (e.g. GitHubMCP): contributes its discovered
+        # ``specs`` and handles calls routed by ``tool_names`` membership.
+        self._mcp = mcp
+        # Session-scoped record of everything MCP tools actually returned
+        # (repo paths, identifiers from fetched files). The caller keeps it
+        # across turns and checks replies against it, so a fabricated file or
+        # function can be flagged instead of passing silently.
+        self._seen_terms = seen_terms if seen_terms is not None else set()
+        # Verbatim text of every file fetched this session, so code the reply
+        # quotes can be checked by substring match rather than judgment.
+        self._code_corpus = code_corpus if code_corpus is not None else []
+        # This turn's tool activity, for ``final_hop_note``.
+        self.tool_calls_made = 0
+        self.mcp_calls = 0
+        self.files_read = []
         self._researcher = researcher
         self._guard = guard
         self._index = index
@@ -117,6 +142,19 @@ class ToolBox:
     @property
     def specs(self):
         """The tool schemas, in the shape the chat-completions API expects."""
+        local = self._local_specs()
+        if self._mcp is None:
+            return local
+        local_names = {spec["function"]["name"] for spec in local}
+        # A remote tool shadowing a local name would make dispatch ambiguous;
+        # the local tool wins.
+        return local + [
+            spec
+            for spec in self._mcp.specs
+            if spec["function"]["name"] not in local_names
+        ]
+
+    def _local_specs(self):
         return [
             {
                 "type": "function",
@@ -249,14 +287,119 @@ class ToolBox:
             "record_evaluation": self._record_evaluation,
         }
         handler = handlers.get(name)
-        if handler is None:
-            return f"error: no tool named {name!r}"
+        if handler is not None:
+            self.tool_calls_made += 1
+            try:
+                return handler(**parsed)
+            except TypeError as exc:
+                # Models do invent arguments a schema never declared; splatting
+                # them would raise out of the tool loop and kill the turn.
+                return f"error: {exc}"
+        if self._mcp is not None and name in self._mcp.tool_names:
+            # Counted only for names that exist: a hallucinated tool name must
+            # not make ``final_hop_note`` claim tools were used.
+            self.tool_calls_made += 1
+            self._on_progress(f"Checking GitHub: {name}…")
+            try:
+                return self._github(name, parsed)
+            except Exception as exc:
+                # Network/auth failures from the remote server must not
+                # escape the never-raise contract.
+                self._on_warning(name, "github tool", str(exc))
+                return f"error: the GitHub tool {name!r} failed: {exc}"
+        return f"error: no tool named {name!r}"
+
+    def final_hop_note(self):
+        """A reminder to inject before the answer is forced, or ``""``.
+
+        The tool loop withholds tools on its last hop to force a text answer.
+        A model still mid-exploration is then cornered: it must say something,
+        cannot fetch more, and (observed twice in testing) either invents a
+        repository or writes out the tool calls it *would* have made along with
+        their imagined results. Naming the situation is what makes stopping
+        honestly an available move — the note therefore fires whenever any tool
+        ran this turn, not only when nothing was read.
+        """
+        if not self.tool_calls_made:
+            return ""
+        preamble = (
+            "SYSTEM NOTE: you have no tool calls left this turn. Whatever you "
+            "have already received is all you get. Do NOT write tool calls, "
+            "tool arguments, or tool results in your reply, and do not "
+            "describe what a further call would have returned — a model in "
+            "your position has been observed acting out the rest of its "
+            "exploration in prose, which is fabrication. "
+        )
+        if self.mcp_calls and not self.files_read:
+            return preamble + (
+                "This turn obtained no file contents at all — only listings, "
+                "searches, or errors — so you have not read any of this "
+                "candidate's code. Say that plainly and ask which file to "
+                "look at, or ask them to describe it."
+            )
+        if self.mcp_calls:
+            return preamble + (
+                "You read: "
+                + ", ".join(self.files_read)
+                + ". Work only from those (and your retrieved context). If you "
+                "need a file you did not read, say so and ask the candidate "
+                "about it, or offer to read it next turn."
+            )
+        return preamble + (
+            "Answer from what the tools already returned; if it was not "
+            "enough, say so plainly."
+        )
+
+    def _github(self, name, arguments):
+        """Relay one MCP call, treating a fetched file like a document.
+
+        Listings and searches come back inline. A file body does not: it is
+        screened fail-closed (like uploads and web research), indexed for
+        retrieval, and returned only as a bounded excerpt — so a large file
+        informs later turns through RAG instead of flooding this one.
+        """
+        self.mcp_calls += 1
+        result = self._mcp.call(name, arguments)
+        if result.errored:
+            return result.text
+        if not result.file_text:
+            self._seen_terms.update(result.terms)
+            return result.text
+
+        self._on_progress(f"Screening {result.source}…")
+        verdict = self._guard.check_document(result.file_text, kind="code")
+        if not should_ingest(verdict):
+            reason = verdict.reason or "the safety scan could not complete"
+            self._on_warning(result.source, "github file blocked", reason)
+            return (
+                "error: that file was withheld by a safety screen; tell the "
+                "candidate you could not read it and ask about another file"
+            )
+
+        self._seen_terms.update(result.terms)
+        self._code_corpus.append(result.file_text)
+        self.files_read.append(result.source)
+        doc = IngestedDocument(
+            name=result.source, doc_type="github", text=result.file_text
+        )
         try:
-            return handler(**parsed)
-        except TypeError as exc:
-            # Models do invent arguments a schema never declared; splatting
-            # them would raise out of the tool loop and kill the turn.
-            return f"error: {exc}"
+            self._index.add_document(doc)
+        except Exception as exc:
+            # Indexing is the durability half; the excerpt below still works.
+            self._on_warning(doc.name, "error", str(exc))
+        else:
+            self._on_document(doc)
+
+        excerpt = result.file_text[:GITHUB_FILE_INLINE_CHARS]
+        note = ""
+        if len(result.file_text) > GITHUB_FILE_INLINE_CHARS:
+            note = (
+                f"\n\n[Truncated at {GITHUB_FILE_INLINE_CHARS} of "
+                f"{len(result.file_text)} characters. The whole file is "
+                "indexed — ask about the rest and it will reach you through "
+                "your retrieved context on the next turn.]"
+            )
+        return f"{result.source} (real contents, read just now):\n{excerpt}{note}"
 
     def _web_research(self, query, topic="other"):
         # Type-check before touching str methods: JSON-valid arguments can

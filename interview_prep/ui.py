@@ -118,6 +118,33 @@ def render_embedding_selector(models: list[str]) -> None:
     )
 
 
+# Shown once per session after a repository turn run below "high" effort.
+# A deep-dive is a multi-step tool workflow — decide what to open, list it, read
+# a file, decide again — and reasoning effort is what buys that discipline.
+# Below "high", models were observed guessing plausible paths instead of listing
+# directories, and narrating tool calls instead of making them (ADR-0130).
+GITHUB_EFFORT_HINT = (
+    "**Tip for repository deep-dives.** Reading code takes several tool steps, "
+    "and this works noticeably better with **Reasoning → Effort** set to "
+    "**high** in the sidebar. At lower effort the interviewer may guess at file "
+    "names rather than looking them up. (Choosing a more capable model will "
+    "help too, and is coming.)"
+)
+
+
+def github_effort_hint(mcp_calls, reasoning_effort):
+    """The deep-dive tip to flash after this turn, or ``None``.
+
+    Only when the turn actually used the GitHub tools and effort is below
+    "high". Returns ``None`` when the active model has no reasoning support
+    (``reasoning_effort is None``), since the tip names a sidebar control that
+    is then not on screen.
+    """
+    if not mcp_calls or reasoning_effort is None or reasoning_effort == "high":
+        return None
+    return GITHUB_EFFORT_HINT
+
+
 def warning_message(entry) -> str:
     """One warning line for a document event (used by the log and the flash)."""
     if entry["kind"] == "flagged":
@@ -128,6 +155,32 @@ def warning_message(entry) -> str:
         return (
             f"**{entry['name']}** replaced a previously ingested document "
             "with the same name."
+        )
+    if entry["kind"] == "github unavailable":
+        return (
+            "Couldn't reach the GitHub tools, so the interview continues "
+            "without them"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+        )
+    if entry["kind"] == "unverified code":
+        # Backticks, not bold: a path like ``src/pkg/__init__.py`` rendered as
+        # markdown emphasis loses its underscores and reads as a different file.
+        return (
+            f"The reply referred to `{entry['name']}`, which never appeared "
+            "in anything the interviewer actually read from GitHub. Treat that "
+            "part as possibly invented — ask it to re-read the file."
+        )
+    if entry["kind"] == "unquoted code":
+        return (
+            "The reply showed a code block starting `"
+            f"{entry['name']}` that does not match any file read from GitHub. "
+            "It may be the interviewer's own illustration — but if it was "
+            "presented as your code, treat it as invented."
+        )
+    if entry["kind"] == "github file blocked":
+        return (
+            f"`{entry['name']}` was withheld by the safety scan"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
         )
     if entry["kind"] == "retrieval":
         return (

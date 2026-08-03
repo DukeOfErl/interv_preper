@@ -131,8 +131,9 @@ def format_context_block(chunks: list[RetrievedChunk]) -> str:
     ]
     return (
         "The following excerpts were retrieved from the candidate's uploaded "
-        "documents, from prior web research, and from the interviewer's "
-        "curated knowledge base:\n\n" + "\n\n".join(sections)
+        "documents, from prior web research, from the interviewer's curated "
+        "knowledge base, and from repository files read earlier:\n\n"
+        + "\n\n".join(sections)
     )
 
 

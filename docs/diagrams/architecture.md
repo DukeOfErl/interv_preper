@@ -7,8 +7,9 @@
 > Diagrams here follow the principles in [`DIAGRAMS.md`](DIAGRAMS.md): one story
 > per diagram, sequence diagrams for temporal flows, ~7±2 boxes each.
 
-Five views, from most dynamic to most static. Shared conventions: **dotted
+Six views, from most dynamic to most static. Shared conventions: **dotted
 arrows** = network calls to OpenRouter, **solid arrows** = in-process;
+arrows** = network calls to an external API, **solid arrows** = in-process;
 **orange** = external API, **blue** = markdown prompt files.
 
 ## 1. A chat turn
@@ -90,7 +91,45 @@ screened bullets (dual-LLM quarantine; ADR-0100); both scans fail **closed**
 like document ingestion; the indexed excerpts let diagram 1's retrieval serve
 follow-up turns without a new search.
 
-## 3. Document ingestion
+## 3. A GitHub portfolio turn (MCP)
+
+*What happens when the candidate shares their GitHub username?* Unlike
+diagram 2's bespoke tool, the tools here belong to the **GitHub remote MCP
+server** — the app only discovers and relays them (ADR-0130).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant L as InterviewLLM<br/>(llm.py)
+    participant T as ToolBox<br/>(tools.py)
+    participant M as GitHubMCP<br/>(github_mcp.py)
+    participant S as GitHub MCP server<br/>(api.githubcopilot.com)
+    participant G as JailbreakGuard<br/>(guardrails.py)
+    participant R as DocumentIndex<br/>(retrieval.py)
+
+    Note over M,S: once per session, first turn:<br/>tools/list → read-only allowlist → cached specs
+    U->>L: "my GitHub is octocat" (after consenting)
+    L->>T: run get_file_contents(owner, repo, path)
+    T->>M: call(name, args)
+    M->>S: tools/call (fresh connection, PAT,<br/>compact-output args forced)
+    S->>M: file body (embedded resource)
+    M->>T: MCPResult: inline text + file_text + terms
+    T->>G: scan file as "code" (fails closed)
+    T->>R: index as "github" doc<br/>(owner/repo/path)
+    T->>L: bounded excerpt (or error string — never raises)
+    L->>U: grounded question about the real code
+    Note over L,U: after the reply: names it claims are<br/>checked against terms → warning if invented
+```
+
+Key points: the schemas come from the server at runtime, not from Python; only
+allowlisted read-only tools are forwarded, each with a consent-policy suffix;
+no PAT or a failed discovery degrades to a session without GitHub tools. A
+file body never enters the conversation whole — it is screened, indexed, and
+excerpted, so diagram 1's retrieval carries the rest into later turns
+(ADR-0130).
+
+## 4. Document ingestion
 
 *What happens when the user drops a file into the sidebar?*
 
@@ -111,7 +150,7 @@ Note the polarity: this scan **fails closed** per document (no clean scan → no
 ingestion), the opposite of the per-turn chat guardrail, which fails open so a
 classifier outage never blocks the conversation.
 
-## 4. Knowledge-base startup sync
+## 5. Knowledge-base startup sync
 
 *How does the persistent knowledge base stay in step with its seed files?*
 (Runs once per session, and again when the embedding model changes.)
@@ -138,10 +177,10 @@ is a derived artifact (delete it and it rebuilds); a warm start makes zero
 network calls; switching back to a previously used embedding model re-embeds
 nothing (ADR-0110).
 
-## 5. Module map
+## 6. Module map
 
 *What are the parts, and what depends on what?* Static structure only — no
-runtime edges (those are diagrams 1–3).
+runtime edges (those are diagrams 1–5).
 
 ```mermaid
 flowchart TB
@@ -153,13 +192,14 @@ flowchart TB
         rag["document RAG + knowledge base<br/>ingest.py · retrieval.py · knowledgebase.py"]
         safety["guardrail<br/>guardrails.py"]
         llmC["LLM + accounting<br/>llm.py · pricing.py · context.py"]
-        toolsC["tools<br/>tools.py · web_research.py"]
+        toolsC["tools<br/>tools.py · web_research.py · github_mcp.py"]
         uiC["rendering<br/>ui.py"]
     end
 
     mdfiles["prompts/*.md — interviewer behavior lives here, not in Python<br/>(personas + guardrail classifier prompt)"]
     kbfiles["knowledgebase/*.md — curated seeds (versioned);<br/>data/knowledgebase.db is derived, gitignored"]
     orouter["OpenRouter API<br/>/chat/completions · /models · /embeddings"]
+    ghmcp["GitHub MCP server<br/>tools/list · tools/call"]
     evals["evals/ — standalone prompt evals<br/>(reuses prompt loading; never imported by the app)"]
 
     entry --> pkg
@@ -171,12 +211,14 @@ flowchart TB
     safety -.-> orouter
     llmC -.-> orouter
     toolsC -.-> orouter
+    toolsC -.-> ghmcp
     evals --> promptsC
     evals -.-> orouter
 
     classDef ext fill:#f9e0c3,stroke:#b5651d,color:#000
     classDef mdfile fill:#dfeef7,stroke:#2b6a8f,color:#000
     class orouter ext
+    class ghmcp ext
     class mdfiles mdfile
     class kbfiles mdfile
 ```
