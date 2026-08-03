@@ -21,7 +21,16 @@ MODELS_CACHE_TTL_SECONDS = 3600
 # "call model → run tools → call model again", and a model that keeps requesting
 # tools (e.g. retrying a failing one) would otherwise spin indefinitely at full
 # token cost. On the final hop the tools are withheld, forcing a text answer.
-MAX_TOOL_HOPS = 4
+#
+# The budget is (MAX_TOOL_HOPS - 1) *sequential* rounds, since the last hop
+# withholds tools. Sized for repository exploration, which needs several: find
+# the repo, list the root, list a package, read a file, read another — and one
+# wasted round on a guessed path that 404s is normal. At 4 (enough for web
+# research's single search) a deep-dive ran out mid-exploration and the model,
+# forced to answer with tools gone, wrote out imaginary tool calls and results
+# instead of admitting it had stopped early (ADR-0130). A model may also batch
+# several calls into one hop, which stretches the budget further.
+MAX_TOOL_HOPS = 9
 
 # --- Web research tool ----------------------------------------------------------
 #
@@ -69,6 +78,53 @@ EVALUATION_DIMENSIONS = [
 QUESTION_TYPES = ["behavioral", "technical", "other"]
 EVALUATION_SCORE_MIN = 1
 EVALUATION_SCORE_MAX = 5
+
+# --- GitHub MCP tools -------------------------------------------------------
+#
+# The interviewer can also browse a candidate's public GitHub repos (a
+# "portfolio deep-dive") through the official GitHub remote MCP server. Unlike
+# ``web_research`` — a bespoke tool whose schema lives in ``tools.py`` — these
+# tools are DISCOVERED at runtime over the Model Context Protocol: the client
+# asks the server ``tools/list`` and forwards the schemas to the interviewer
+# model, then relays each ``tools/call``. Only the read-only tools named below
+# are forwarded; everything else the server offers is dropped at discovery
+# time. Requires a GitHub PAT (see ``load_github_pat``); without one the app
+# simply offers no GitHub tools.
+GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
+# Read-only allowlist. Names must match the server's ``tools/list`` exactly —
+# a wrong name silently yields fewer tools, so the integration smoke test
+# prints the live list for reconciliation.
+GITHUB_MCP_ALLOWED_TOOLS = (
+    "search_repositories",
+    "get_file_contents",
+    "search_code",
+)
+# Arguments forced on outgoing calls, overriding whatever the model supplied.
+# These are context-budget policy, not semantics: the server's verbose defaults
+# return mostly URL templates and API hrefs the interviewer can neither follow
+# nor learn from, and that noise both wastes the window and (observed in
+# testing) teaches the model that tool results are JSON it could write itself.
+# Measured against a real repo: a root listing shrinks 7590 → 935 chars, and a
+# repo search 4000 → 395.
+GITHUB_MCP_ARG_OVERRIDES = {
+    "search_repositories": {"minimal_output": True},
+    "get_file_contents": {"fields": ["type", "name", "path", "size"]},
+}
+# A fetched file is indexed in full for retrieval, but only this much of it
+# comes back inline as the tool result — enough for the interviewer to ask a
+# grounded question in the same turn, bounded so a large file cannot flood the
+# conversation (the rest arrives via RAG on later turns).
+#
+# Sized so that whole files, not heads of files, are the normal case: a README
+# or config file always fits, and most single modules do too (measured on a
+# real portfolio repo, 4000 truncated its core module to 40%). The budget is
+# cheap because tool results are per-turn scratch — only the user message and
+# the assistant's text are persisted, so an excerpt costs tokens in its own
+# turn and then disappears; MAX_TOOL_HOPS caps a turn at a few reads. Above
+# this size, head-truncating further buys little: the note on a truncated
+# result tells the model to ask again next turn, when retrieval can surface
+# the part that is actually relevant instead of merely the part that is first.
+GITHUB_FILE_INLINE_CHARS = 12000
 
 # Reasoning effort presets, offered in the sidebar only when the active model is
 # a reasoning model. Ordered low→high; sent to OpenRouter as
@@ -122,7 +178,14 @@ CHUNK_SIZE_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 150
 TOP_K = 6
 RETRIEVED_CONTEXT_PLACEHOLDER = "{retrieved_context}"
-DOCUMENT_TYPES = ["resume", "job ad", "cover letter", "web search", "other"]
+DOCUMENT_TYPES = [
+    "resume",
+    "job ad",
+    "cover letter",
+    "web search",
+    "github",
+    "other",
+]
 UPLOAD_FILE_TYPES = ["pdf", "docx", "txt", "md"]
 
 # --- Curated knowledge base -----------------------------------------------------
@@ -194,3 +257,12 @@ def load_api_key():
     """
     load_dotenv()
     return os.getenv("OPENROUTER_API_KEY")
+
+
+def load_github_pat():
+    """Load a local ``.env`` (if present) and return the GitHub PAT.
+
+    Returns ``None`` when unset — the app then runs without GitHub tools.
+    """
+    load_dotenv()
+    return os.getenv("GITHUB_PAT")
