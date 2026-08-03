@@ -10,9 +10,18 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
-Accumulates the work in progress toward **0.2.0** (document RAG and web
-research); these entries move under a `## [0.2.0]` heading when that work is
-complete and tagged.
+Nothing yet.
+
+## [0.2.0] - 2026-08-04
+
+The version where the interviewer stopped relying only on what the user types
+at it, and started reading: uploaded documents, the web, a curated knowledge
+base, and the candidate's own code on GitHub (git tag `v0.2.0`).
+
+Everything it reads is treated as untrusted and reaches the interview through
+an explicit contract — a guardrail scan, a provenance-labelled context block,
+and, for anything it then claims about that material, a check that the claim
+matches what was actually retrieved.
 
 ### Fixed
 - A tool call the model writes out as text no longer ends the turn as if it
