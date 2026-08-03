@@ -140,6 +140,12 @@ def warning_message(entry) -> str:
             "Couldn't rephrase your message into a search query — retrieved "
             "using your message as-is, which may match your documents less well."
         )
+    if entry["kind"] == "knowledgebase":
+        return (
+            "The knowledge base couldn't be loaded — replies this session "
+            "won't draw on the curated interview guidance"
+            + (f" ({entry['reason']})." if entry["reason"] else ".")
+        )
     return (
         f"**{entry['name']}** was not accepted because it couldn't be "
         f"processed ({entry['reason']}). You can try uploading it again."
@@ -230,6 +236,21 @@ def render_web_sources_panel(citations) -> None:
                 if len(cite.content) > 300:
                     excerpt += "…"
                 st.caption(excerpt)
+
+
+def render_knowledgebase_panel(kb) -> None:
+    """Summarize the persistent knowledge base (Developer tab)."""
+    with st.expander("Knowledge Base", expanded=False):
+        if kb is None:
+            st.caption("Knowledge base unavailable this session (see Warnings).")
+            return
+        docs = kb.documents()
+        if not docs:
+            st.caption("The knowledge base is empty — add seeds to knowledgebase/.")
+            return
+        for doc in docs:
+            st.markdown(f"**{doc.name}** — {doc.category}")
+            st.caption(f"{doc.n_chunks} chunk(s)")
 
 
 def render_spend_metrics(spend: ChatSpend) -> None:

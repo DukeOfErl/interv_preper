@@ -13,7 +13,7 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "GPT-5-Mini"
-TYPING_DELAY_SECONDS = 0.05
+TYPING_DELAY_SECONDS = 0.01
 MODELS_CACHE_TTL_SECONDS = 3600
 
 # Tool calling: how many times one turn may round-trip through tools before we
@@ -104,6 +104,23 @@ TOP_K = 6
 RETRIEVED_CONTEXT_PLACEHOLDER = "{retrieved_context}"
 DOCUMENT_TYPES = ["resume", "job ad", "cover letter", "web search", "other"]
 UPLOAD_FILE_TYPES = ["pdf", "docx", "txt", "md"]
+
+# --- Curated knowledge base -----------------------------------------------------
+#
+# Coach-side reference material (interview best practices, question banks tagged
+# by role, legal guidelines, bias-reduction tips, …) that persists across
+# sessions. The source of truth is the seed folder — markdown files with YAML
+# frontmatter, versioned in git; the SQLite file under ``data/`` is a derived
+# artifact (gitignored) holding the chunked text plus cached embeddings,
+# reconciled against the seeds by per-file content hash (see ADR-0110).
+#
+# The knowledge base follows the sidebar embedding selector. Embeddings are
+# cached in the DB per (chunk, model), so switching back to a previously used
+# model re-embeds nothing; only chunks never embedded under the active model
+# are backfilled.
+KNOWLEDGEBASE_DIR = ROOT_DIR / "knowledgebase"
+KNOWLEDGEBASE_DB_PATH = ROOT_DIR / "data" / "knowledgebase.db"
+KB_TOP_K = 4
 
 # Before retrieval on a follow-up turn, a small model rewrites the user's
 # message into a standalone search query (resolving "that", "it", etc.) so
