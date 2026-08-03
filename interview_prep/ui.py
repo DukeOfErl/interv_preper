@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from .config import DOCUMENT_TYPES, UPLOAD_FILE_TYPES
+from .config import DOCUMENT_TYPES, EVALUATION_DIMENSIONS, UPLOAD_FILE_TYPES
 from .context import ContextUsage
 from .pricing import ChatSpend, format_spend
 from .prompts import PromptLibrary, PromptSource
@@ -135,6 +135,12 @@ def warning_message(entry) -> str:
             "document context. Your documents are still indexed; the next turn "
             "will try again."
         )
+    if entry["kind"] == "evaluation":
+        return (
+            "The interviewer gave answer feedback without recording an "
+            "evaluation card — this answer is missing from the Evaluations "
+            "tab."
+        )
     if entry["kind"] == "condense":
         return (
             "Couldn't rephrase your message into a search query — retrieved "
@@ -257,6 +263,61 @@ def render_knowledgebase_panel(kb) -> None:
         for doc in docs:
             st.markdown(f"**{doc.name}** — {doc.category}")
             st.caption(f"{doc.n_chunks} chunk(s)")
+
+
+def summarize_cards(cards):
+    """Per-dimension mean scores across the cards, in rubric order.
+
+    Computed in Python, deliberately never asked of the model — an aggregate
+    the model states can disagree with its own per-answer cards; an aggregate
+    we compute cannot. Returns {} for no cards.
+    """
+    if not cards:
+        return {}
+    return {
+        dimension: sum(c["scores"][dimension] for c in cards) / len(cards)
+        for dimension in EVALUATION_DIMENSIONS
+    }
+
+
+def _scores_line(scores, fmt="{:.0f}") -> str:
+    """One compact ``Rel 4 · Str 3 · …`` line from a scores mapping.
+
+    Labels are the first three letters of each dimension name — compact
+    enough for the narrow sidebar, and derived so a new dimension needs no
+    extra bookkeeping.
+    """
+    return " · ".join(
+        f"{d[:3].title()} {fmt.format(scores[d])}" for d in EVALUATION_DIMENSIONS
+    )
+
+
+def render_evaluations_tab(cards) -> None:
+    """The Evaluations tab: computed summary on top, then one card per answer.
+
+    Cards render newest first (like the Warnings log). Scores stay always
+    visible; the verbal feedback folds into a collapsed expander so several
+    cards can be scanned at once.
+    """
+    if not cards:
+        st.caption(
+            "No evaluations yet — cards appear here once the mock interview "
+            "starts and answers get scored."
+        )
+        return
+    means = summarize_cards(cards)
+    st.subheader(f"Interview so far ({len(cards)} answer(s))")
+    st.markdown(_scores_line(means, fmt="{:.1f}"))
+    st.divider()
+    for number, card in reversed(list(enumerate(cards, start=1))):
+        average = sum(card["scores"].values()) / len(card["scores"])
+        st.markdown(f"**Q{number} · {card['question_type']} · avg {average:.1f}**")
+        st.caption(card["question"])
+        st.markdown(_scores_line(card["scores"]))
+        if card["verbal_feedback"]:
+            with st.expander("Feedback", expanded=False):
+                st.markdown(card["verbal_feedback"])
+        st.divider()
 
 
 def render_spend_metrics(spend: ChatSpend) -> None:

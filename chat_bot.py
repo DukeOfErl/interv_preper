@@ -53,7 +53,7 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
-from interview_prep.tools import ToolBox
+from interview_prep.tools import ToolBox, looks_like_feedback
 from interview_prep.web_research import WebResearcher
 from interview_prep.ui import (
     warning_message,
@@ -62,6 +62,7 @@ from interview_prep.ui import (
     render_document_uploader,
     render_documents_panel,
     render_embedding_selector,
+    render_evaluations_tab,
     render_history,
     render_knowledgebase_panel,
     render_prompt_selector,
@@ -238,6 +239,7 @@ def main() -> None:
     st.session_state.setdefault("last_tool_calls", [])
     st.session_state.setdefault("web_sources", [])
     st.session_state.setdefault("web_research_cache", {})
+    st.session_state.setdefault("evaluation_cards", [])
     st.session_state.setdefault("prompt_source_key", default_source(sources).key)
     # A stored key can go stale if a source is renamed/removed between runs;
     # reset it before the widget renders, since the selectbox requires its bound
@@ -246,11 +248,12 @@ def main() -> None:
     if st.session_state["prompt_source_key"] not in source_keys:
         st.session_state["prompt_source_key"] = default_source(sources).key
 
-    # Three sidebar tabs: everything the interviewee touches lives in Interview;
-    # diagnostics (context, spend, prompt config, retrieval debug) in Developer;
-    # the accumulated document-rejection log in Warnings.
-    interview_tab, dev_tab, warnings_tab = st.sidebar.tabs(
-        ["Interview", "Developer", "Warnings"]
+    # Four sidebar tabs: everything the interviewee touches lives in Interview;
+    # the accumulated per-answer evaluation cards in Evaluations; diagnostics
+    # (context, spend, prompt config, retrieval debug) in Developer; the
+    # accumulated document-rejection log in Warnings.
+    interview_tab, evaluations_tab, dev_tab, warnings_tab = st.sidebar.tabs(
+        ["Interview", "Evaluations", "Developer", "Warnings"]
     )
 
     model = st.session_state["openai_model"]
@@ -314,6 +317,9 @@ def main() -> None:
     with interview_tab:
         render_documents_panel(st.session_state["ingested_docs"], doc_index)
         render_web_sources_panel(st.session_state["web_sources"])
+
+    with evaluations_tab:
+        render_evaluations_tab(st.session_state["evaluation_cards"])
 
     with dev_tab:
         render_embedding_selector(EMBEDDING_MODELS)
@@ -507,6 +513,16 @@ def main() -> None:
         st.session_state["last_tool_calls"] = llm.last_tool_calls
         if toolbox is not None and toolbox.citations:
             st.session_state["web_sources"] = list(toolbox.citations)
+        # Evaluation cards commit only on an allowed, completed turn — the
+        # toolbox accumulated them during the stream, but a turn the guardrail
+        # blocks persists nothing, cards included.
+        if toolbox is not None:
+            st.session_state["evaluation_cards"].extend(toolbox.evaluations)
+            if looks_like_feedback(assistant_reply) and not toolbox.evaluations:
+                # The reply reads like scored answer feedback, but no card was
+                # recorded — the model skipped the record_evaluation call. The
+                # user-facing text lives in ui.warning_message.
+                record_warning("", "evaluation")
         cost = llm.last_cost
         if cost is None:
             pricing_now = get_model_pricing(model, api_key)
