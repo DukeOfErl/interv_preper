@@ -119,6 +119,23 @@ def test_format_context_block_web_chunk_carries_topic_label():
     )
 
 
+def test_format_context_block_github_chunk_names_the_file():
+    # The header shape 15_grounding.md documents for repository files.
+    block = format_context_block(
+        [
+            make_chunk(
+                source="octocat/Hello-World/src/core.py",
+                doc_type="github",
+                text="def run(): ...",
+            )
+        ]
+    )
+    assert (
+        "### github: octocat/Hello-World/src/core.py (part 1)\ndef run(): ..."
+        in block
+    )
+
+
 def test_format_context_block_empty():
     assert format_context_block([]) == ""
 

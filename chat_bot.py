@@ -23,6 +23,7 @@ from interview_prep.config import (
     QUERY_REWRITE_HISTORY_TURNS,
     REASONING_EFFORTS,
     load_api_key,
+    load_github_pat,
 )
 from interview_prep.context import (
     compute_context_usage,
@@ -30,6 +31,11 @@ from interview_prep.context import (
     estimate_text_tokens,
     model_supports_reasoning,
     predict_next_call_tokens,
+)
+from interview_prep.github_mcp import (
+    GitHubMCP,
+    unquoted_code_blocks,
+    unverified_references,
 )
 from interview_prep.guardrails import JailbreakGuard
 from interview_prep.ingest import (
@@ -53,15 +59,17 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
-from interview_prep.tools import ToolBox
+from interview_prep.tools import ToolBox, looks_like_feedback
 from interview_prep.web_research import WebResearcher
 from interview_prep.ui import (
     warning_message,
+    github_effort_hint,
     render_api_key_input,
     render_context_bar,
     render_document_uploader,
     render_documents_panel,
     render_embedding_selector,
+    render_evaluations_tab,
     render_history,
     render_knowledgebase_panel,
     render_prompt_selector,
@@ -107,6 +115,9 @@ def sync_documents(api_key, container) -> DocumentIndex:
     st.session_state.setdefault("ingested_file_ids", set())
     st.session_state.setdefault("warnings_log", [])
     st.session_state.setdefault("flash_warnings", [])
+    # Same one-shot mechanism as flash_warnings, for guidance rather than
+    # failure (currently the deep-dive reasoning-effort tip, shown once).
+    st.session_state.setdefault("flash_notices", [])
     st.session_state.setdefault("last_retrieval", [])
     st.session_state.setdefault("last_query", "")
     st.session_state.setdefault("doc_uploader_nonce", 0)
@@ -238,6 +249,14 @@ def main() -> None:
     st.session_state.setdefault("last_tool_calls", [])
     st.session_state.setdefault("web_sources", [])
     st.session_state.setdefault("web_research_cache", {})
+    st.session_state.setdefault("evaluation_cards", [])
+    # Everything GitHub tools really returned this session; replies are checked
+    # against it so an invented file or function can be flagged.
+    st.session_state.setdefault("github_seen_terms", set())
+    # Verbatim text of every repository file read, so quoted code can be
+    # checked against what was actually fetched.
+    st.session_state.setdefault("github_code_corpus", [])
+    st.session_state.setdefault("github_hint_shown", False)
     st.session_state.setdefault("prompt_source_key", default_source(sources).key)
     # A stored key can go stale if a source is renamed/removed between runs;
     # reset it before the widget renders, since the selectbox requires its bound
@@ -246,11 +265,12 @@ def main() -> None:
     if st.session_state["prompt_source_key"] not in source_keys:
         st.session_state["prompt_source_key"] = default_source(sources).key
 
-    # Three sidebar tabs: everything the interviewee touches lives in Interview;
-    # diagnostics (context, spend, prompt config, retrieval debug) in Developer;
-    # the accumulated document-rejection log in Warnings.
-    interview_tab, dev_tab, warnings_tab = st.sidebar.tabs(
-        ["Interview", "Developer", "Warnings"]
+    # Four sidebar tabs: everything the interviewee touches lives in Interview;
+    # the accumulated per-answer evaluation cards in Evaluations; diagnostics
+    # (context, spend, prompt config, retrieval debug) in Developer; the
+    # accumulated document-rejection log in Warnings.
+    interview_tab, evaluations_tab, dev_tab, warnings_tab = st.sidebar.tabs(
+        ["Interview", "Evaluations", "Developer", "Warnings"]
     )
 
     model = st.session_state["openai_model"]
@@ -315,6 +335,9 @@ def main() -> None:
         render_documents_panel(st.session_state["ingested_docs"], doc_index)
         render_web_sources_panel(st.session_state["web_sources"])
 
+    with evaluations_tab:
+        render_evaluations_tab(st.session_state["evaluation_cards"])
+
     with dev_tab:
         render_embedding_selector(EMBEDDING_MODELS)
         render_sidebar(library, usage, spend)
@@ -339,6 +362,9 @@ def main() -> None:
     for message in st.session_state["flash_warnings"]:
         st.warning(f"⚠️ {message}")
     st.session_state["flash_warnings"] = []
+    for message in st.session_state["flash_notices"]:
+        st.info(message)
+    st.session_state["flash_notices"] = []
 
     has_user_prompt = any(m.get("role") == "user" for m in messages)
     placeholder = (
@@ -439,6 +465,27 @@ def main() -> None:
                     docs[:] = [d for d in docs if d.name != doc.name]
                     docs.append(doc)
 
+                # GitHub portfolio tools (MCP) ride in the same toolbox. The
+                # tools/list discovery round-trip runs once per session; its
+                # converted schemas are cached in session state. A discovery
+                # failure warns and caches an empty list, so the session
+                # degrades to no GitHub tools without retrying every turn.
+                github_mcp = None
+                pat = load_github_pat()
+                if pat:
+                    if "github_mcp_specs" not in st.session_state:
+                        show_progress("Connecting to the GitHub tools…")
+                        try:
+                            st.session_state["github_mcp_specs"] = GitHubMCP(
+                                pat=pat
+                            ).discover()
+                        except Exception as exc:
+                            record_warning("GitHub tools", "github unavailable", str(exc))
+                            st.session_state["github_mcp_specs"] = []
+                    cached_specs = st.session_state["github_mcp_specs"]
+                    if cached_specs:
+                        github_mcp = GitHubMCP(pat=pat, specs=cached_specs)
+
                 toolbox = ToolBox(
                     researcher=WebResearcher(api_key=api_key),
                     guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
@@ -447,6 +494,9 @@ def main() -> None:
                     on_warning=record_warning,
                     on_progress=show_progress,
                     on_document=register_document,
+                    mcp=github_mcp,
+                    seen_terms=st.session_state["github_seen_terms"],
+                    code_corpus=st.session_state["github_code_corpus"],
                 )
 
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -503,10 +553,54 @@ def main() -> None:
 
         # Allowed: accrue this turn's ACTUAL spend (OpenRouter's reported cost),
         # falling back to reported token counts × price, then rough estimates.
-        assistant_reply = "".join(reply_parts)
+        # Persist the answer, not the preamble: text a hop emitted before
+        # calling a tool is status ("let me look that up") — and is where a
+        # model sometimes writes raw tool-call JSON instead of prose. It was
+        # painted live; repaint the slot so what stays matches what is stored.
+        # ``answered`` rather than a truthiness check: a legitimately empty
+        # final hop must not fall back to the raw stream, which is exactly the
+        # preamble and typed-tool-call JSON this keeps out of the transcript.
+        assistant_reply = (
+            llm.answer_text if llm.answered else "".join(reply_parts)
+        )
+        if assistant_reply != "".join(reply_parts):
+            slot.markdown(assistant_reply)
         st.session_state["last_tool_calls"] = llm.last_tool_calls
+
+        # Fabrication check: a model that failed to read a repo has been
+        # observed inventing plausible files and functions instead of saying
+        # so. Anything the reply names that no tool result ever contained is
+        # surfaced to the user (Warnings tab + a flash in the chat).
+        for reference in unverified_references(
+            assistant_reply, st.session_state["github_seen_terms"]
+        ):
+            record_warning(reference, "unverified code")
+        # And code it quotes must appear verbatim in a file we really fetched.
+        for preview in unquoted_code_blocks(
+            assistant_reply, st.session_state["github_code_corpus"]
+        ):
+            record_warning(preview, "unquoted code")
+
+        # A deep-dive is a multi-step tool workflow, and it degrades badly below
+        # "high" effort — tell the user once, after a turn that actually used
+        # the GitHub tools, so the advice arrives with the evidence for it.
+        if toolbox is not None and not st.session_state["github_hint_shown"]:
+            hint = github_effort_hint(toolbox.mcp_calls, reasoning_effort)
+            if hint:
+                st.session_state["flash_notices"].append(hint)
+                st.session_state["github_hint_shown"] = True
         if toolbox is not None and toolbox.citations:
             st.session_state["web_sources"] = list(toolbox.citations)
+        # Evaluation cards commit only on an allowed, completed turn — the
+        # toolbox accumulated them during the stream, but a turn the guardrail
+        # blocks persists nothing, cards included.
+        if toolbox is not None:
+            st.session_state["evaluation_cards"].extend(toolbox.evaluations)
+            if looks_like_feedback(assistant_reply) and not toolbox.evaluations:
+                # The reply reads like scored answer feedback, but no card was
+                # recorded — the model skipped the record_evaluation call. The
+                # user-facing text lives in ui.warning_message.
+                record_warning("", "evaluation")
         cost = llm.last_cost
         if cost is None:
             pricing_now = get_model_pricing(model, api_key)

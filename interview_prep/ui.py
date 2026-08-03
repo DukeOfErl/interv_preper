@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from .config import DOCUMENT_TYPES, UPLOAD_FILE_TYPES
+from .config import DOCUMENT_TYPES, EVALUATION_DIMENSIONS, UPLOAD_FILE_TYPES
 from .context import ContextUsage
 from .pricing import ChatSpend, format_spend
 from .prompts import PromptLibrary, PromptSource
@@ -118,6 +118,33 @@ def render_embedding_selector(models: list[str]) -> None:
     )
 
 
+# Shown once per session after a repository turn run below "high" effort.
+# A deep-dive is a multi-step tool workflow — decide what to open, list it, read
+# a file, decide again — and reasoning effort is what buys that discipline.
+# Below "high", models were observed guessing plausible paths instead of listing
+# directories, and narrating tool calls instead of making them (ADR-0130).
+GITHUB_EFFORT_HINT = (
+    "**Tip for repository deep-dives.** Reading code takes several tool steps, "
+    "and this works noticeably better with **Reasoning → Effort** set to "
+    "**high** in the sidebar. At lower effort the interviewer may guess at file "
+    "names rather than looking them up. (Choosing a more capable model will "
+    "help too, and is coming.)"
+)
+
+
+def github_effort_hint(mcp_calls, reasoning_effort):
+    """The deep-dive tip to flash after this turn, or ``None``.
+
+    Only when the turn actually used the GitHub tools and effort is below
+    "high". Returns ``None`` when the active model has no reasoning support
+    (``reasoning_effort is None``), since the tip names a sidebar control that
+    is then not on screen.
+    """
+    if not mcp_calls or reasoning_effort is None or reasoning_effort == "high":
+        return None
+    return GITHUB_EFFORT_HINT
+
+
 def warning_message(entry) -> str:
     """One warning line for a document event (used by the log and the flash)."""
     if entry["kind"] == "flagged":
@@ -129,11 +156,43 @@ def warning_message(entry) -> str:
             f"**{entry['name']}** replaced a previously ingested document "
             "with the same name."
         )
+    if entry["kind"] == "github unavailable":
+        return (
+            "Couldn't reach the GitHub tools, so the interview continues "
+            "without them"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+        )
+    if entry["kind"] == "unverified code":
+        # Backticks, not bold: a path like ``src/pkg/__init__.py`` rendered as
+        # markdown emphasis loses its underscores and reads as a different file.
+        return (
+            f"The reply referred to `{entry['name']}`, which never appeared "
+            "in anything the interviewer actually read from GitHub. Treat that "
+            "part as possibly invented — ask it to re-read the file."
+        )
+    if entry["kind"] == "unquoted code":
+        return (
+            "The reply showed a code block starting `"
+            f"{entry['name']}` that does not match any file read from GitHub. "
+            "It may be the interviewer's own illustration — but if it was "
+            "presented as your code, treat it as invented."
+        )
+    if entry["kind"] == "github file blocked":
+        return (
+            f"`{entry['name']}` was withheld by the safety scan"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+        )
     if entry["kind"] == "retrieval":
         return (
             "Document retrieval failed — this reply was generated **without** "
             "document context. Your documents are still indexed; the next turn "
             "will try again."
+        )
+    if entry["kind"] == "evaluation":
+        return (
+            "The interviewer gave answer feedback without recording an "
+            "evaluation card — this answer is missing from the Evaluations "
+            "tab."
         )
     if entry["kind"] == "condense":
         return (
@@ -257,6 +316,61 @@ def render_knowledgebase_panel(kb) -> None:
         for doc in docs:
             st.markdown(f"**{doc.name}** — {doc.category}")
             st.caption(f"{doc.n_chunks} chunk(s)")
+
+
+def summarize_cards(cards):
+    """Per-dimension mean scores across the cards, in rubric order.
+
+    Computed in Python, deliberately never asked of the model — an aggregate
+    the model states can disagree with its own per-answer cards; an aggregate
+    we compute cannot. Returns {} for no cards.
+    """
+    if not cards:
+        return {}
+    return {
+        dimension: sum(c["scores"][dimension] for c in cards) / len(cards)
+        for dimension in EVALUATION_DIMENSIONS
+    }
+
+
+def _scores_line(scores, fmt="{:.0f}") -> str:
+    """One compact ``Rel 4 · Str 3 · …`` line from a scores mapping.
+
+    Labels are the first three letters of each dimension name — compact
+    enough for the narrow sidebar, and derived so a new dimension needs no
+    extra bookkeeping.
+    """
+    return " · ".join(
+        f"{d[:3].title()} {fmt.format(scores[d])}" for d in EVALUATION_DIMENSIONS
+    )
+
+
+def render_evaluations_tab(cards) -> None:
+    """The Evaluations tab: computed summary on top, then one card per answer.
+
+    Cards render newest first (like the Warnings log). Scores stay always
+    visible; the verbal feedback folds into a collapsed expander so several
+    cards can be scanned at once.
+    """
+    if not cards:
+        st.caption(
+            "No evaluations yet — cards appear here once the mock interview "
+            "starts and answers get scored."
+        )
+        return
+    means = summarize_cards(cards)
+    st.subheader(f"Interview so far ({len(cards)} answer(s))")
+    st.markdown(_scores_line(means, fmt="{:.1f}"))
+    st.divider()
+    for number, card in reversed(list(enumerate(cards, start=1))):
+        average = sum(card["scores"].values()) / len(card["scores"])
+        st.markdown(f"**Q{number} · {card['question_type']} · avg {average:.1f}**")
+        st.caption(card["question"])
+        st.markdown(_scores_line(card["scores"]))
+        if card["verbal_feedback"]:
+            with st.expander("Feedback", expanded=False):
+                st.markdown(card["verbal_feedback"])
+        st.divider()
 
 
 def render_spend_metrics(spend: ChatSpend) -> None:

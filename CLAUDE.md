@@ -117,8 +117,9 @@ uv run pytest path/to/test.py::name  # run a single test
 - `prompts.py` — `PromptSource` / `PromptLibrary` / `PromptFile`: discover, load, and compose the markdown prompt
 - `context.py` — token estimation + `get_model_context_window()`; `compute_context_usage()` returns a `ContextUsage`
 - `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens; with a `toolbox` it becomes the tool-calling loop (stream → run tools → stream again, capped by `MAX_TOOL_HOPS`, cost accumulated across hops)
-- `tools.py` — `ToolBox`: tool schemas + dispatcher (`run()` never raises — failures return error strings). One tool: `web_research(query, topic)`, consent-gated in its description
+- `tools.py` — `ToolBox`: tool schemas + dispatcher (`run()` never raises — failures return error strings). Two local tools with opposite policies: `web_research(query, topic)` (consent-gated) and `record_evaluation(...)` (always-call after scoring — the structured-output channel behind the Evaluations tab, ADR-0120). Optionally also carries an MCP client (`mcp=`) whose discovered tools it merges and dispatches — a fetched repository file goes through the same fail-closed scan → index → bounded-excerpt route as web research's tier two (ADR-0130)
 - `web_research.py` — `WebResearcher`: quarantined sub-completion over OpenRouter's `web` plugin; returns cited bullets + verbatim excerpts; citation links validated in code (ADR-0100)
+- `github_mcp.py` — `GitHubMCP`: MCP client of the official GitHub remote MCP server (streamable HTTP + `GITHUB_PAT`); discovers tools at runtime, forwards a read-only allowlist with a consent suffix, relays calls one `asyncio.run` connection at a time (forcing compact-output args), returns an `MCPResult` that splits a fetched file's body from the inline text; discovery cached per session, fails soft. Also the after-the-fact fabrication checks — `unverified_references()` (invented names) and `unquoted_code_blocks()` (code blocks matching no fetched file) (ADR-0130)
 - `ingest.py` — `parse_document()` (PDF/DOCX/TXT/MD → text), `infer_doc_type()`, `should_ingest()` (the fail-closed screening policy)
 - `retrieval.py` — `DocumentIndex` (LangChain `InMemoryVectorStore` + `OpenAIEmbeddings` via OpenRouter), `format_context_block()` / `fill_retrieved_context()` (the context-block contract)
 - `knowledgebase.py` — `KnowledgeBase`: persistent curated reference material. Seeds live in `knowledgebase/*.md` (YAML frontmatter: category/tags, versioned in git); the derived SQLite file `data/knowledgebase.db` (gitignored) caches chunks + per-model embeddings, reconciled at startup by per-file content hash; cosine retrieval returns `RetrievedChunk`s that merge into the same context block (ADR-0110)
@@ -150,7 +151,7 @@ The default source, `prompts/multi-role interviewer/`, holds the staged prompts:
 
 - **`docs/REQUIREMENTS.md`** — the behavioral spec: document RAG, the guardrails, query condensation, cost/token accounting, reasoning effort, streaming.
 - **`docs/decisions/`** — the ADRs (0010–0090): *why* each of those was built the way it was (e.g. fail-closed windowed document guardrail vs. fail-open concurrent chat guardrail; condense queries + defer LangGraph; LangChain for retrieval, raw SDK for chat).
-- **`docs/diagrams/architecture.md`** — the chat-turn, ingestion, and module-map diagrams.
+- **`docs/diagrams/architecture.md`** — the chat-turn, tool-turn (web research / GitHub MCP), ingestion, and module-map diagrams.
 
 Read the relevant doc when a task touches that subsystem; keep it and the code in sync per **Documentation upkeep** above.
 
