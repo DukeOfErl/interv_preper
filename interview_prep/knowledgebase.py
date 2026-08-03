@@ -108,7 +108,12 @@ def parse_seed(raw: str) -> tuple[str, dict, str]:
     match = _FRONTMATTER.match(raw)
     if not match:
         return DEFAULT_CATEGORY, {}, raw.strip()
-    meta = yaml.safe_load(match.group(1))
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        # Fail open per file: a malformed frontmatter must not take down the
+        # whole knowledge base — treat the file as untagged plain content.
+        return DEFAULT_CATEGORY, {}, raw.strip()
     meta = meta if isinstance(meta, dict) else {}
     tags = meta.get("tags")
     return (
@@ -148,23 +153,39 @@ class KnowledgeBase:
         )
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # check_same_thread=False: Streamlit reruns the script on varying
-        # worker threads while this object lives in session state; access
-        # within a session is still sequential.
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        if self._conn.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
-            self._conn.executescript(
-                "DROP TABLE IF EXISTS embeddings;"
-                "DROP TABLE IF EXISTS chunks;"
-                "DROP TABLE IF EXISTS documents;"
-                f"PRAGMA user_version = {_SCHEMA_VERSION};"
-            )
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        try:
+            self._conn = self._open(path)
+        except sqlite3.DatabaseError:
+            # A corrupt (or non-SQLite) file would otherwise disable the
+            # knowledge base every session. It is a derived artifact — the
+            # seeds are the truth — so discard it and rebuild from scratch.
+            path.unlink()
+            self._conn = self._open(path)
         # Per-model (rows, matrix) retrieval cache; dropped whenever sync
         # changes anything.
         self._cache: dict[str, tuple[list, np.ndarray]] = {}
+
+    @staticmethod
+    def _open(path):
+        # check_same_thread=False: Streamlit reruns the script on varying
+        # worker threads while this object lives in session state; access
+        # within a session is still sequential.
+        conn = sqlite3.connect(str(path), check_same_thread=False)
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            if conn.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+                conn.executescript(
+                    "DROP TABLE IF EXISTS embeddings;"
+                    "DROP TABLE IF EXISTS chunks;"
+                    "DROP TABLE IF EXISTS documents;"
+                    f"PRAGMA user_version = {_SCHEMA_VERSION};"
+                )
+            conn.executescript(_SCHEMA)
+            conn.commit()
+        except sqlite3.DatabaseError:
+            conn.close()
+            raise
+        return conn
 
     def _openrouter_embeddings(self, model):
         # check_embedding_ctx_length uses tiktoken to pre-tokenize, which only
@@ -243,20 +264,24 @@ class KnowledgeBase:
                 "INSERT INTO embeddings (chunk_id, model, vector) VALUES (?, ?, ?)",
                 [
                     (chunk_pk, model, np.asarray(vec, dtype=np.float32).tobytes())
-                    for (chunk_pk, _), vec in zip(missing, vectors)
+                    # strict: a count mismatch from the embeddings API must
+                    # raise (and roll back), not silently leave chunks
+                    # unembedded while the report claims otherwise.
+                    for (chunk_pk, _), vec in zip(missing, vectors, strict=True)
                 ],
             )
 
         self._conn.commit()
-        report = SyncReport(
+        # Unconditional: sync is the "refresh my view" point. A sibling
+        # instance on the same DB (another Streamlit session) may have changed
+        # content this instance's own passes found nothing to do about.
+        self._cache.clear()
+        return SyncReport(
             added=added,
             updated=updated,
             removed=removed,
             chunks_embedded=len(missing),
         )
-        if report.changed:
-            self._cache.clear()
-        return report
 
     def _replace_document(self, name, digest, raw) -> None:
         category, tags, body = parse_seed(raw)
