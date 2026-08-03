@@ -205,9 +205,26 @@ def test_frontmatter_only_and_empty_files_yield_zero_chunks(tmp_path):
 
 
 @pytest.mark.parametrize("frontmatter", ["- a\n- b", "42"])
-def test_non_dict_frontmatter_falls_back_to_defaults(frontmatter):
-    category, tags, body = parse_seed(f"---\n{frontmatter}\n---\nBody text.")
-    assert (category, tags, body) == ("general", {}, "Body text.")
+def test_non_dict_frontmatter_keeps_whole_file_as_body(frontmatter):
+    raw = f"---\n{frontmatter}\n---\nBody text."
+    category, tags, body = parse_seed(raw)
+    assert (category, tags) == ("general", {})
+    # Not metadata → nothing is stripped; dropping the pseudo-frontmatter
+    # would silently lose content (see the leading-rule test below).
+    assert body == raw
+
+
+def test_leading_horizontal_rule_loses_no_content():
+    raw = "---\n\nIntro paragraph.\n\n---\n\nOutro."
+    category, tags, body = parse_seed(raw)
+    assert (category, tags) == ("general", {})
+    assert "Intro paragraph." in body and "Outro." in body
+
+
+def test_explicit_empty_category_falls_back_to_default():
+    category, _, body = parse_seed("---\ncategory:\n---\nBody.")
+    assert category == "general"  # not the literal string "None"
+    assert body == "Body."
 
 
 def test_tags_as_list_dropped_and_odd_values_stringified():
@@ -285,6 +302,39 @@ def test_schema_version_mismatch_drops_and_rebuilds(tmp_path, seed_dir):
     assert embedders["model-a"].documents_embedded > 0
 
 
+def test_lock_error_does_not_delete_healthy_db(tmp_path, seed_dir, monkeypatch):
+    kb, _ = make_kb(tmp_path)
+    kb.sync(seed_dir, "model-a")
+    kb.close()
+    db_path = tmp_path / "data" / "kb.db"
+
+    # "database is locked" is an OperationalError — a DatabaseError subclass —
+    # raised when a sibling session holds the lock. It must propagate, NOT
+    # trigger the corruption self-heal that unlinks the file.
+    def locked(path):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(KnowledgeBase, "_open", staticmethod(locked))
+    with pytest.raises(sqlite3.OperationalError):
+        make_kb(tmp_path)
+    monkeypatch.undo()
+
+    assert db_path.exists()
+    reopened, _ = make_kb(tmp_path)  # data survived intact
+    assert not reopened.is_empty
+
+
+def test_non_utf8_seed_degrades_that_file_only(tmp_path, seed_dir):
+    # 0x92 is a Windows-1252 curly quote — invalid UTF-8, a common paste slip.
+    (seed_dir / "pasted.md").write_bytes(b"Don\x92t ask leading questions.")
+    kb, _ = make_kb(tmp_path)
+    report = kb.sync(seed_dir, "model-a")  # must not raise
+
+    assert report.added == 3
+    texts = [c.text for c in kb.retrieve("leading questions", "model-a", k=20)]
+    assert any("ask leading questions." in t for t in texts)
+
+
 def test_corrupt_db_file_is_discarded_and_rebuilt(tmp_path, seed_dir):
     db_path = tmp_path / "data" / "kb.db"
     db_path.parent.mkdir(parents=True)
@@ -326,6 +376,9 @@ def test_failed_embedding_mid_sync_persists_nothing(tmp_path, seed_dir):
     )
     with pytest.raises(RuntimeError):
         kb.sync(seed_dir, "model-a")
+    # The failed sync rolled back — no write transaction (RESERVED lock) may
+    # linger on the long-lived connection to block sibling sessions.
+    assert not kb._conn.in_transaction
     kb.close()
 
     # Nothing was committed — a fresh open sees an empty KB and a clean sync
@@ -351,6 +404,15 @@ def test_second_instance_serves_stale_cache_until_resync(tmp_path, seed_dir):
     kb_a.sync(seed_dir, "model-a")
     fresh = [c.text for c in kb_a.retrieve("advice", "model-a", k=10)]
     assert "Rewritten advice." in fresh
+
+
+def test_probes_need_no_db_after_sync(tmp_path, seed_dir):
+    kb, _ = make_kb(tmp_path)
+    kb.sync(seed_dir, "model-a")
+    kb.close()  # sever the DB — the rerun-path probes must still answer
+
+    assert not kb.is_empty
+    assert {d.name for d in kb.documents()} == {"question-bank", "best-practices"}
 
 
 # --- Retrieval & API misbehavior --------------------------------------------------

@@ -114,10 +114,16 @@ def parse_seed(raw: str) -> tuple[str, dict, str]:
         # Fail open per file: a malformed frontmatter must not take down the
         # whole knowledge base — treat the file as untagged plain content.
         return DEFAULT_CATEGORY, {}, raw.strip()
-    meta = meta if isinstance(meta, dict) else {}
+    if not isinstance(meta, dict):
+        # Not metadata at all — e.g. a leading `---` used as a horizontal
+        # rule. Keep the WHOLE file as body: stripping the pseudo-frontmatter
+        # would silently drop real content.
+        return DEFAULT_CATEGORY, {}, raw.strip()
     tags = meta.get("tags")
     return (
-        str(meta.get("category", DEFAULT_CATEGORY)),
+        # `or`, not a get() default: an explicit-but-empty `category:` key
+        # yields None, which must not become the literal string "None".
+        str(meta.get("category") or DEFAULT_CATEGORY),
         tags if isinstance(tags, dict) else {},
         raw[match.end() :].strip(),
     )
@@ -155,15 +161,24 @@ class KnowledgeBase:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._conn = self._open(path)
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as exc:
             # A corrupt (or non-SQLite) file would otherwise disable the
             # knowledge base every session. It is a derived artifact — the
             # seeds are the truth — so discard it and rebuild from scratch.
+            # ONLY on actual corruption: OperationalError ("database is
+            # locked", a sibling session's transaction) is also a
+            # DatabaseError, and must not delete a healthy DB.
+            if "not a database" not in str(exc):
+                raise
             path.unlink()
             self._conn = self._open(path)
         # Per-model (rows, matrix) retrieval cache; dropped whenever sync
         # changes anything.
         self._cache: dict[str, tuple[list, np.ndarray]] = {}
+        # Documents snapshot, refreshed by sync(): lets the per-rerun probes
+        # (is_empty, documents) run without touching the DB, so they cannot
+        # fail on the unguarded UI path.
+        self._documents = self._load_documents()
 
     @staticmethod
     def _open(path):
@@ -204,9 +219,13 @@ class KnowledgeBase:
 
     @property
     def is_empty(self) -> bool:
-        return self._conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is None
+        return not any(doc.n_chunks for doc in self._documents)
 
     def documents(self) -> list[KBDocument]:
+        """The documents snapshot as of the last sync — no DB access."""
+        return list(self._documents)
+
+    def _load_documents(self) -> list[KBDocument]:
         rows = self._conn.execute(
             "SELECT d.name, d.category, d.tags, COUNT(c.id)"
             " FROM documents d LEFT JOIN chunks c ON c.doc_id = d.id"
@@ -236,7 +255,9 @@ class KnowledgeBase:
         added = updated = removed = 0
         seen = set()
         for path in files:
-            raw = path.read_text(encoding="utf-8")
+            # errors="replace": a stray non-UTF-8 byte (a pasted Windows-1252
+            # quote) degrades that character, not the whole knowledge base.
+            raw = path.read_text(encoding="utf-8", errors="replace")
             name = path.stem
             seen.add(name)
             digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -253,29 +274,39 @@ class KnowledgeBase:
                 self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
                 removed += 1
 
-        missing = self._conn.execute(
-            "SELECT c.id, c.text FROM chunks c WHERE NOT EXISTS ("
-            " SELECT 1 FROM embeddings e WHERE e.chunk_id = c.id AND e.model = ?)",
-            (model,),
-        ).fetchall()
-        if missing:
-            vectors = self._embedder(model).embed_documents([t for _, t in missing])
-            self._conn.executemany(
-                "INSERT INTO embeddings (chunk_id, model, vector) VALUES (?, ?, ?)",
-                [
-                    (chunk_pk, model, np.asarray(vec, dtype=np.float32).tobytes())
-                    # strict: a count mismatch from the embeddings API must
-                    # raise (and roll back), not silently leave chunks
-                    # unembedded while the report claims otherwise.
-                    for (chunk_pk, _), vec in zip(missing, vectors, strict=True)
-                ],
-            )
-
-        self._conn.commit()
+        try:
+            missing = self._conn.execute(
+                "SELECT c.id, c.text FROM chunks c WHERE NOT EXISTS ("
+                " SELECT 1 FROM embeddings e WHERE e.chunk_id = c.id AND e.model = ?)",
+                (model,),
+            ).fetchall()
+            if missing:
+                vectors = self._embedder(model).embed_documents(
+                    [t for _, t in missing]
+                )
+                self._conn.executemany(
+                    "INSERT INTO embeddings (chunk_id, model, vector) VALUES (?, ?, ?)",
+                    [
+                        (chunk_pk, model, np.asarray(vec, dtype=np.float32).tobytes())
+                        # strict: a count mismatch from the embeddings API must
+                        # raise (and roll back), not silently leave chunks
+                        # unembedded while the report claims otherwise.
+                        for (chunk_pk, _), vec in zip(missing, vectors, strict=True)
+                    ],
+                )
+            self._conn.commit()
+        except Exception:
+            # Roll back the content pass too: a failed sync must not keep an
+            # open write transaction (it would hold a RESERVED lock on the
+            # shared DB file for the rest of the session) or leave the DB
+            # half-updated.
+            self._conn.rollback()
+            raise
         # Unconditional: sync is the "refresh my view" point. A sibling
         # instance on the same DB (another Streamlit session) may have changed
         # content this instance's own passes found nothing to do about.
         self._cache.clear()
+        self._documents = self._load_documents()
         return SyncReport(
             added=added,
             updated=updated,

@@ -187,12 +187,14 @@ def sync_knowledgebase(api_key):
     reruns when the sidebar embedding model changes (cached per-model vectors
     make switching back to a previously used model free). Fails open: on any
     error the session simply runs without the knowledge base, with a warning
-    logged — the flag stops rerun retry loops.
+    logged. The failure latch is per embedding model — it stops rerun retry
+    loops, but a model switch grants one fresh attempt, so a transient error
+    is not a session-wide death sentence.
     """
-    if st.session_state.get("kb_failed"):
-        return None
     kb = st.session_state.get("knowledgebase")
     model = st.session_state["embedding_model"]
+    if st.session_state.get("kb_failed") == model:
+        return None
     try:
         if kb is None:
             kb = KnowledgeBase(db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key)
@@ -202,7 +204,7 @@ def sync_knowledgebase(api_key):
             st.session_state["kb_synced_model"] = model
         st.session_state["knowledgebase"] = kb
     except Exception as exc:
-        st.session_state["kb_failed"] = True
+        st.session_state["kb_failed"] = model
         record_warning("", "knowledgebase", str(exc))
         return None
     return kb
@@ -394,7 +396,10 @@ def main() -> None:
                                 query, st.session_state["embedding_model"]
                             )
                         except Exception as exc:
-                            record_warning("", "retrieval", str(exc))
+                            # Distinct kind: the "retrieval" copy talks about
+                            # uploaded documents, which may not even exist on
+                            # a KB-only grounded turn.
+                            record_warning("", "kb_retrieval", str(exc))
                 st.session_state["last_retrieval"] = retrieved
                 context_block = format_context_block(retrieved)
             effective_prompt = fill_retrieved_context(system_prompt, context_block)

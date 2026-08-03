@@ -13,7 +13,7 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "GPT-5-Mini"
-TYPING_DELAY_SECONDS = 0.01
+TYPING_DELAY_SECONDS = 0.05
 MODELS_CACHE_TTL_SECONDS = 3600
 
 # Tool calling: how many times one turn may round-trip through tools before we

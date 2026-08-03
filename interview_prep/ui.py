@@ -140,6 +140,12 @@ def warning_message(entry) -> str:
             "Couldn't rephrase your message into a search query — retrieved "
             "using your message as-is, which may match your documents less well."
         )
+    if entry["kind"] == "kb_retrieval":
+        return (
+            "Knowledge-base retrieval failed — this reply was generated "
+            "**without** the curated interview guidance. The next turn will "
+            "try again."
+        )
     if entry["kind"] == "knowledgebase":
         return (
             "The knowledge base couldn't be loaded — replies this session "
