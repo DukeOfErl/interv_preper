@@ -17,15 +17,26 @@ from versioned sources), and what happens to persisted vectors when the
 user-selectable embedding model changes (the sidebar offers three models, and
 vectors from different models are not comparable).
 
+The distribution question dominated the second choice: if the database itself
+were the source of truth, anyone cloning the app (a reviewer, a new machine, a
+fresh checkout) would need the DB **hosted somewhere and downloaded** — an
+artifact store, a release asset, or a binary committed to git — plus a way to
+keep that hosted copy in sync with the code. Deriving the DB from files that
+already live in the repo makes the repo the only distribution channel.
+
 ## Decision
 
 1. **Plain SQLite, no vector extension.** One derived file
    (`data/knowledgebase.db`, gitignored) with three tables — `documents`,
    `chunks`, `embeddings` — and retrieval as brute-force cosine over the
    cached vectors in numpy. `interview_prep/knowledgebase.py` owns all of it.
-2. **Seeds in git, DB derived.** The source of truth is `knowledgebase/*.md`
-   (YAML frontmatter: `category` + free-form `tags`), versioned and reviewable
-   like the prompt files. Startup reconciles the DB against the seeds by
+2. **Seeds in git, DB derived — primarily so no database ever needs hosting.**
+   The source of truth is `knowledgebase/*.md` (YAML frontmatter: `category` +
+   free-form `tags`); the DB is rebuilt locally from them, so cloning the repo
+   is the *complete* setup — there is no hosted artifact to download, publish,
+   or keep in sync with the code. Secondary benefits follow: the content is
+   versioned, diffable, and code-reviewable like the prompt files, and git
+   doubles as its backup. Startup reconciles the DB against the seeds by
    **per-file content hash** — new/changed files are re-chunked, vanished
    files deleted, unchanged files skipped — so a warm start touches the
    network zero times and a reviewer's clone self-builds on first run. A
