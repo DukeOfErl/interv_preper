@@ -53,6 +53,7 @@ dependencies = [
     "langchain-core==1.4.8",
     "langchain-openai==1.3.3",
     "langchain-protocol==0.0.18",
+    "langchain-text-splitters==1.1.2",
     "langgraph==1.2.6",
     "langgraph-checkpoint==4.1.1",
     "langgraph-prebuilt==1.1.0",
@@ -96,7 +97,9 @@ dependencies = [
     "pyfiglet==1.0.4",
     "pygments==2.20.0",
     "pyparsing==3.3.2",
+    "pypdf==6.14.2",
     "python-dateutil==2.9.0.post0",
+    "python-docx==1.2.0",
     "python-dotenv==1.2.2",
     "python-multipart==0.0.32",
     "pyyaml==6.0.3",
@@ -146,7 +149,16 @@ dev = [
     "matplotlib-inline==0.2.2",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
     "pytest-repeat==0.9.4",
     "pytest-rerunfailures==16.4",
     "pytest-xdist==3.8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--cov=interview_prep --cov-report=term-missing"
+markers = [
+    "integration: makes real network calls; skipped unless OPENROUTER_API_KEY is set",
 ]
