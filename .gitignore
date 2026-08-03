@@ -17,6 +17,9 @@ htmlcov/
 # Local secrets
 .env
 
+# Derived data — the knowledge-base DB is rebuilt from knowledgebase/ seeds
+data/
+
 # Editor / IDE (no trailing slash: these appear as /dev/null device nodes
 # under WSL, not real directories, so a dir-only pattern would miss them)
 .idea

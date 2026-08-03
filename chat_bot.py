@@ -18,6 +18,8 @@ from interview_prep.config import (
     DEFAULT_REASONING_EFFORT,
     EMBEDDING_MODELS,
     GUARDRAIL_DOC_MODEL,
+    KNOWLEDGEBASE_DB_PATH,
+    KNOWLEDGEBASE_DIR,
     QUERY_REWRITE_HISTORY_TURNS,
     REASONING_EFFORTS,
     load_api_key,
@@ -37,6 +39,7 @@ from interview_prep.ingest import (
     parse_document,
     should_ingest,
 )
+from interview_prep.knowledgebase import KnowledgeBase
 from interview_prep.llm import InterviewLLM
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
 from interview_prep.prompts import (
@@ -60,6 +63,7 @@ from interview_prep.ui import (
     render_documents_panel,
     render_embedding_selector,
     render_history,
+    render_knowledgebase_panel,
     render_prompt_selector,
     render_reasoning_selector,
     render_retrieval_panel,
@@ -176,6 +180,36 @@ def sync_documents(api_key, container) -> DocumentIndex:
     return index
 
 
+def sync_knowledgebase(api_key):
+    """Open the persistent knowledge base and reconcile it with the seeds.
+
+    The content sync runs once per session; the embedding-coverage sync also
+    reruns when the sidebar embedding model changes (cached per-model vectors
+    make switching back to a previously used model free). Fails open: on any
+    error the session simply runs without the knowledge base, with a warning
+    logged. The failure latch is per embedding model — it stops rerun retry
+    loops, but a model switch grants one fresh attempt, so a transient error
+    is not a session-wide death sentence.
+    """
+    kb = st.session_state.get("knowledgebase")
+    model = st.session_state["embedding_model"]
+    if st.session_state.get("kb_failed") == model:
+        return None
+    try:
+        if kb is None:
+            kb = KnowledgeBase(db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key)
+        if st.session_state.get("kb_synced_model") != model:
+            with st.spinner("Syncing the knowledge base…"):
+                kb.sync(KNOWLEDGEBASE_DIR, model)
+            st.session_state["kb_synced_model"] = model
+        st.session_state["knowledgebase"] = kb
+    except Exception as exc:
+        st.session_state["kb_failed"] = model
+        record_warning("", "knowledgebase", str(exc))
+        return None
+    return kb
+
+
 def main() -> None:
     # Prefer a key from the environment/.env; otherwise let the user paste one
     # into the sidebar (kept in session only). Fail fast until we have a key.
@@ -271,6 +305,7 @@ def main() -> None:
     # The uploader renders into the interview tab (below the above), then the
     # ingested panel renders right under it.
     doc_index = sync_documents(api_key, interview_tab)
+    kb = sync_knowledgebase(api_key)
     if st.session_state["ingested_docs"] and not library.is_grounding_aware:
         grounding_warning_slot.warning(
             "⚠️ This prompt source is not grounding-aware — uploaded "
@@ -287,6 +322,7 @@ def main() -> None:
             st.session_state["last_retrieval"], st.session_state["last_query"]
         )
         render_tool_calls_panel(st.session_state["last_tool_calls"])
+        render_knowledgebase_panel(kb)
 
     with warnings_tab:
         render_warnings_log(st.session_state["warnings_log"])
@@ -326,7 +362,8 @@ def main() -> None:
         # degrade to an ungrounded turn rather than blocking the chat.
         context_block = ""
         if library.is_grounding_aware:
-            if not doc_index.is_empty:
+            kb_ready = kb is not None and not kb.is_empty
+            if not doc_index.is_empty or kb_ready:
                 # On a follow-up, rewrite the message into a standalone query so
                 # vector search isn't handed an anaphoric fragment ("that role").
                 # The first turn has no referents to resolve — use it verbatim
@@ -344,13 +381,25 @@ def main() -> None:
                 else:
                     query = prompt
                 st.session_state["last_query"] = query
-                try:
-                    with st.spinner("Retrieving document excerpts…"):
-                        retrieved = doc_index.retrieve(query)
-                except Exception as exc:
-                    # Fail open: answer without document context, but say so.
-                    retrieved = []
-                    record_warning("", "retrieval", str(exc))
+                # Both retrievals fail open independently: answer with whatever
+                # context could be fetched, but say so.
+                retrieved = []
+                with st.spinner("Retrieving document excerpts…"):
+                    if not doc_index.is_empty:
+                        try:
+                            retrieved += doc_index.retrieve(query)
+                        except Exception as exc:
+                            record_warning("", "retrieval", str(exc))
+                    if kb_ready:
+                        try:
+                            retrieved += kb.retrieve(
+                                query, st.session_state["embedding_model"]
+                            )
+                        except Exception as exc:
+                            # Distinct kind: the "retrieval" copy talks about
+                            # uploaded documents, which may not even exist on
+                            # a KB-only grounded turn.
+                            record_warning("", "kb_retrieval", str(exc))
                 st.session_state["last_retrieval"] = retrieved
                 context_block = format_context_block(retrieved)
             effective_prompt = fill_retrieved_context(system_prompt, context_block)

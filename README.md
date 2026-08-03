@@ -20,7 +20,7 @@ The interviewer's behavior is defined entirely in the markdown prompt files unde
 - A file whose name ends with **`.ignore.md`** is hidden from the selector (used for non-persona prompts such as `guardrail.ignore.md`).
 - A prompt that contains the **`{retrieved_context}` placeholder** is *grounding-aware*: excerpts retrieved from the uploaded documents are injected there each turn. Prompts without it simply ignore uploaded documents (the sidebar says so).
 
-Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `tools`, `web_research`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `knowledgebase`, `query_rewrite`, `tools`, `web_research`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
 
 ## Documents (RAG)
 
@@ -41,6 +41,12 @@ Ask the interviewer to research something current — the target company's recen
 Under the hood the interviewer calls a `web_research` tool that runs a separate quarantined model over OpenRouter's web-search plugin. You get back cited fact bullets — each citation is a clickable link whose hover text summarizes the source — and the **Web Sources** panel in the sidebar lists the sources with excerpts. The full excerpts are also screened and indexed like an uploaded document (shown in Ingested Documents as type *web search*), so follow-up questions can draw on them without searching again.
 
 Web content is treated as untrusted: everything is scanned by the safety guardrail **before** the interviewer sees it, and a flagged or unscannable result is withheld (the interviewer says research is unavailable rather than using it). A research turn costs a few cents and takes noticeably longer than a normal reply; the running status is shown in the chat while it works, and the **Last Tool Calls** panel (Developer tab) records exactly what was searched and returned.
+
+## Knowledge base
+
+The interviewer also draws on a **curated knowledge base** that persists across sessions: interview best practices, behavioral and technical question banks (tagged with the roles and seniority tiers they fit), legal guidelines on what an interviewer must not ask, bias-reduction guidance, and competency expectations per seniority tier. Each turn, the most relevant excerpts are retrieved alongside your documents — they shape the interviewer's questions, scoring, and feedback, and appear in the **Last Retrieval** panel under `knowledge base — <category>` headers.
+
+The content is authored as markdown files in `knowledgebase/`, each with a small YAML frontmatter (`category`, plus optional `tags` such as roles, seniority, or countries). This files-in-git design exists **primarily so the database never needs to be hosted anywhere**: cloning the repo is the complete setup — the app builds the database locally from the files, with no artifact to download or keep published in sync. It also means that **to add or edit knowledge, you edit those files** — they are versioned in git and reviewable like any code change. The app derives a local SQLite file (`data/knowledgebase.db`, gitignored) from them on startup: changed files are re-embedded incrementally (detected by content hash), and embeddings are cached per model, so a normal start makes no network calls and switching the embedding model back and forth re-embeds nothing. Deleting `data/` is always safe — it rebuilds from the seeds on the next run. The **Knowledge Base** panel (Developer tab) lists what's loaded.
 
 ## Setup
 

@@ -15,6 +15,14 @@ research); these entries move under a `## [0.2.0]` heading when that work is
 complete and tagged.
 
 ### Added
+- Curated knowledge base: coach-side reference material (interview best
+  practices, question banks tagged by role/seniority, legal guidelines on
+  what not to ask, bias-reduction guidance, competency expectations) that
+  persists across sessions and is retrieved each turn alongside uploaded
+  documents. Content is authored as markdown seeds in `knowledgebase/`
+  (versioned in git); the app derives `data/knowledgebase.db` from them at
+  startup by per-file content hash, caching embeddings per model so switching
+  the embedding model back and forth re-embeds nothing. (ADR-0110)
 - Web research on request: the interviewer can call a `web_research` tool
   (consent-gated — only when the user asks or agrees to an offer) that runs a
   quarantined sub-completion over OpenRouter's web-search plugin and returns
