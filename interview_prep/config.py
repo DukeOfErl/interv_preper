@@ -50,6 +50,26 @@ WEB_TOPICS = [
     "other",
 ]
 
+# --- Evaluation cards -------------------------------------------------------------
+#
+# During Phase 3 the interviewer records each answer's evaluation as structured
+# data via the ``record_evaluation`` tool — the same scores it states in chat,
+# captured so the Evaluations tab can compare answers across the interview.
+# The rubric's MEANING lives in the persona markdown (40_feedback_stage.md);
+# this list only fixes the dimension names shared by the tool schema and the
+# UI labels. Order matters: it is the rubric's order, used for display.
+EVALUATION_DIMENSIONS = [
+    "relevance",
+    "structure",
+    "specificity",
+    "evidence",
+    "judgment",
+    "communication",
+]
+QUESTION_TYPES = ["behavioral", "technical", "other"]
+EVALUATION_SCORE_MIN = 1
+EVALUATION_SCORE_MAX = 5
+
 # Reasoning effort presets, offered in the sidebar only when the active model is
 # a reasoning model. Ordered low→high; sent to OpenRouter as
 # ``reasoning.effort``. These three levels are accepted for every reasoning

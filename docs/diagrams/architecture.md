@@ -42,7 +42,7 @@ sequenceDiagram
     alt verdict is jailbreak (whenever it lands)
         CB->>U: stop stream, clear text, warn — nothing persisted
     else allowed
-        CB->>CB: add actual cost, persist turn, single rerun
+        CB->>CB: add actual cost, persist turn<br/>+ evaluation cards, single rerun
     end
 ```
 
@@ -50,11 +50,16 @@ Key points: retrieval happens *before* the stream; the guardrail runs
 *concurrently with* the stream and is polled between tokens; the sidebar
 refreshes only on the rerun after the turn completes.
 
-## 2. A web-research turn
+## 2. A tool-calling turn (web research shown)
 
-*What happens when the user asks the interviewer to research something?* (The
+*What happens when the interviewer calls a tool mid-turn?* (The
 guardrail-vs-stream concurrency and the persist/rerun ending are as in
-diagram 1 — this diagram tells only the tool story.)
+diagram 1 — this diagram tells only the tool story.) The hop loop is the same
+for every tool; `web_research` is drawn because it has the richest flow. The
+other tool, `record_evaluation` (ADR-0120), follows the same shape with steps
+4–9 collapsed to "validate the card, hold it for commit" — no sub-completion,
+no scans, no indexing; its cards are persisted with the turn in diagram 1's
+final step and rendered in the Evaluations tab.
 
 ```mermaid
 sequenceDiagram

@@ -12,10 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from interview_prep.config import MAX_TOOL_HOPS
+import json
+
+from interview_prep.config import EVALUATION_DIMENSIONS, MAX_TOOL_HOPS
 from interview_prep.guardrails import GuardrailResult
 from interview_prep.llm import InterviewLLM
-from interview_prep.tools import ToolBox
+from interview_prep.tools import ToolBox, looks_like_feedback
 from interview_prep.web_research import Citation, ResearchResult
 
 
@@ -326,3 +328,156 @@ def test_dispatch_errors_are_strings_never_raises():
     assert "no tool named" in box.run("nonexistent", "{}")
     assert "error" in box.run("web_research", '{"query": "q", "invented": 1}')
     assert "non-empty" in box.run("web_research", '{"query": "  ", "topic": "other"}')
+
+
+# --- record_evaluation dispatch -----------------------------------------------------
+
+
+GOOD_SCORES = {d: i % 5 + 1 for i, d in enumerate(EVALUATION_DIMENSIONS)}
+
+
+def evaluation_args(**overrides):
+    args = {
+        "question": "Tell me about a conflict you handled.",
+        "question_type": "behavioral",
+        "scores": GOOD_SCORES,
+        "verbal_feedback": "Strong structure; add measurable outcomes.",
+    }
+    args.update(overrides)
+    return json.dumps(args)
+
+
+def test_valid_evaluation_is_recorded_and_acknowledged():
+    box, *_ = make_toolbox()
+    out = box.run("record_evaluation", evaluation_args())
+    assert out == "evaluation recorded"
+    # Accumulated on the box for the caller's post-verdict commit.
+    (card,) = box.evaluations
+    assert card["scores"] == GOOD_SCORES
+    assert card["question_type"] == "behavioral"
+    assert card["verbal_feedback"].startswith("Strong structure")
+
+
+def test_repeat_call_for_same_question_replaces_the_card():
+    """A model occasionally re-records with revised scores on the next hop;
+    same question means correction, so it replaces rather than appends."""
+    box, *_ = make_toolbox()
+    box.run("record_evaluation", evaluation_args())
+    out = box.run(
+        "record_evaluation",
+        evaluation_args(scores=dict(GOOD_SCORES, relevance=5)),
+    )
+    assert "replaced" in out
+    (card,) = box.evaluations  # still exactly one
+    assert card["scores"]["relevance"] == 5
+
+
+def test_different_questions_in_one_turn_both_keep_their_cards():
+    """One message can answer two outstanding questions — two cards."""
+    box, *_ = make_toolbox()
+    box.run("record_evaluation", evaluation_args())
+    out = box.run(
+        "record_evaluation", evaluation_args(question="Describe a system you built.")
+    )
+    assert out == "evaluation recorded"
+    assert [c["question"] for c in box.evaluations] == [
+        "Tell me about a conflict you handled.",
+        "Describe a system you built.",
+    ]
+
+
+def test_integral_float_scores_are_accepted():
+    """JSON Schema's 'integer' accepts 4.0; rejecting it would make a
+    schema-conforming call fail and burn hops on identical retries."""
+    box, *_ = make_toolbox()
+    scores = {d: float(v) for d, v in GOOD_SCORES.items()}
+    out = box.run("record_evaluation", evaluation_args(scores=scores))
+    assert out == "evaluation recorded"
+    assert box.evaluations[0]["scores"] == GOOD_SCORES  # stored as ints
+
+
+def test_non_string_arguments_return_errors_not_crashes():
+    """JSON-valid but wrongly-typed args must come back as error strings —
+    an AttributeError here would escape run() and kill the whole turn."""
+    box, *_ = make_toolbox()
+    assert box.run("record_evaluation", evaluation_args(question=12)).startswith(
+        "error:"
+    )
+    assert box.run(
+        "record_evaluation", evaluation_args(verbal_feedback=["good"])
+    ).startswith("error:")
+    assert box.run("web_research", '{"query": 12, "topic": "other"}').startswith(
+        "error:"
+    )
+    assert box.evaluations == []
+
+
+def test_evaluation_missing_dimension_is_an_error():
+    box, *_ = make_toolbox()
+    scores = {d: 3 for d in EVALUATION_DIMENSIONS[:-1]}
+    out = box.run("record_evaluation", evaluation_args(scores=scores))
+    assert out.startswith("error:")
+    assert EVALUATION_DIMENSIONS[-1] in out
+    assert box.evaluations == []
+
+
+def test_evaluation_out_of_range_or_non_integer_score_is_an_error():
+    box, *_ = make_toolbox()
+    bad = dict(GOOD_SCORES, relevance=6)
+    assert box.run("record_evaluation", evaluation_args(scores=bad)).startswith("error:")
+    bad = dict(GOOD_SCORES, judgment="high")
+    assert box.run("record_evaluation", evaluation_args(scores=bad)).startswith("error:")
+    assert box.evaluations == []
+
+
+def test_evaluation_unknown_question_type_coerced_to_other():
+    box, *_ = make_toolbox()
+    box.run("record_evaluation", evaluation_args(question_type="rhetorical"))
+    assert box.evaluations[0]["question_type"] == "other"
+
+
+def test_two_tool_dispatch_still_routes_web_research():
+    box, researcher, _, _ = make_toolbox()
+    box.run("web_research", '{"query": "Acme", "topic": "other"}')
+    assert researcher.queries == ["Acme"]
+
+
+def test_specs_offer_both_tools():
+    box, *_ = make_toolbox()
+    names = [spec["function"]["name"] for spec in box.specs]
+    assert names == ["web_research", "record_evaluation"]
+
+
+def test_looks_like_feedback_detects_scored_replies():
+    scored = (
+        "Quick feedback:\n- Relevance: 4/5 — on point.\n"
+        "- Structure: 3/5 — loose ending.\n- Evidence: 2/5 — no metrics.\n"
+        "Next question: tell me about scale."
+    )
+    assert looks_like_feedback(scored)
+
+
+def test_looks_like_feedback_is_conservative():
+    # Ordinary interview prose mentioning a dimension or two must not trip it.
+    assert not looks_like_feedback("Can you give more structure to that answer?")
+    assert not looks_like_feedback(
+        "Your communication was clear. Let's move to question 3 of 5."
+    )
+    assert not looks_like_feedback("")
+    # A rubric ANNOUNCEMENT lists ranges, not scores — no card is correct.
+    assert not looks_like_feedback(
+        "I will score each answer on Relevance (1-5), Structure (1-5), "
+        "Specificity (1-5), Evidence (1-5) before we move on."
+    )
+    # A session RECAP quotes decimal averages, not per-answer scores.
+    assert not looks_like_feedback(
+        "So far: relevance averaged 4.2, structure 3.8, evidence 2.9 — "
+        "let's keep practicing."
+    )
+
+
+def test_looks_like_feedback_matches_real_formats():
+    # Bold-labeled and dash-separated variants seen in live replies.
+    assert looks_like_feedback(
+        "**Relevance**: 4\n**Structure** — 3\n**Evidence**: 2/5\nNext question:"
+    )

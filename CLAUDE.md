@@ -117,7 +117,7 @@ uv run pytest path/to/test.py::name  # run a single test
 - `prompts.py` — `PromptSource` / `PromptLibrary` / `PromptFile`: discover, load, and compose the markdown prompt
 - `context.py` — token estimation + `get_model_context_window()`; `compute_context_usage()` returns a `ContextUsage`
 - `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens; with a `toolbox` it becomes the tool-calling loop (stream → run tools → stream again, capped by `MAX_TOOL_HOPS`, cost accumulated across hops)
-- `tools.py` — `ToolBox`: tool schemas + dispatcher (`run()` never raises — failures return error strings). One tool: `web_research(query, topic)`, consent-gated in its description
+- `tools.py` — `ToolBox`: tool schemas + dispatcher (`run()` never raises — failures return error strings). Two tools with opposite policies: `web_research(query, topic)` (consent-gated) and `record_evaluation(...)` (always-call after scoring — the structured-output channel behind the Evaluations tab, ADR-0120)
 - `web_research.py` — `WebResearcher`: quarantined sub-completion over OpenRouter's `web` plugin; returns cited bullets + verbatim excerpts; citation links validated in code (ADR-0100)
 - `ingest.py` — `parse_document()` (PDF/DOCX/TXT/MD → text), `infer_doc_type()`, `should_ingest()` (the fail-closed screening policy)
 - `retrieval.py` — `DocumentIndex` (LangChain `InMemoryVectorStore` + `OpenAIEmbeddings` via OpenRouter), `format_context_block()` / `fill_retrieved_context()` (the context-block contract)

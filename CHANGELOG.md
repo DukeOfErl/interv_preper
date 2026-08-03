@@ -23,6 +23,12 @@ complete and tagged.
   (versioned in git); the app derives `data/knowledgebase.db` from them at
   startup by per-file content hash, caching embeddings per model so switching
   the embedding model back and forth re-embeds nothing. (ADR-0110)
+- Evaluation cards: every scored answer is also recorded as structured data
+  (question, type, the six rubric scores, verbal feedback) via a
+  `record_evaluation` tool call, and accumulates in a new **Evaluations**
+  sidebar tab — scores always visible, verbal feedback folded, with
+  per-dimension averages across the interview computed at the top. A feedback
+  reply that skips its card raises a warning. Session-scoped. (ADR-0120)
 - Web research on request: the interviewer can call a `web_research` tool
   (consent-gated — only when the user asks or agrees to an offer) that runs a
   quarantined sub-completion over OpenRouter's web-search plugin and returns
