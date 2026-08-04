@@ -10,7 +10,15 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- Developer-facing skill `.claude/skills/tool-loop-honesty/`, capturing what the
+  GitHub MCP work taught about keeping a tool-using model from fabricating when
+  its tool calls fail or run out: how to shape tool results so failure is
+  unmistakable, how to size a loop so an honest "I could not get it" stays
+  reachable, and how to verify claims against what the tools actually returned.
+  Written as a synthesis of published findings and our own episodes, with each
+  claim marked as measured, vendor guidance, or hypothesis. No change to the
+  app. (ADR-0140)
 
 ## [0.2.0] - 2026-08-04
 

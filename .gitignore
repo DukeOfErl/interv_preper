@@ -25,8 +25,13 @@ data/
 .idea
 .vscode
 
-# Tooling / agent local state
-.claude/
+# Tooling / agent local state. Ignore the contents rather than the directory
+# itself (`.claude/*`, not `.claude/`) so the exception below can re-include a
+# subdirectory — git will not descend into an excluded directory, so a negation
+# under a `.claude/` rule would never match. Local state (settings.local.json,
+# worktrees, .cc-writes) stays ignored; checked-in agent skills do not.
+.claude/*
+!.claude/skills/
 .mcp.json
 .ripgreprc
 .gitmodules
