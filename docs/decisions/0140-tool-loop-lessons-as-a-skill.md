@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-05
-- **Pull request:** —
+- **Pull request:** #7
 
 ## Context
 
