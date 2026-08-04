@@ -10,7 +10,11 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- The wait before a reply starts streaming is no longer a bare spinner: the
+  assistant slot shows *Reasoning with low/medium/high effort…* (or *Waiting
+  for the model's reply…* for non-reasoning models) until the first token
+  arrives.
 
 ## [0.2.0] - 2026-08-04
 

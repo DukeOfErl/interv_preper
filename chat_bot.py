@@ -499,6 +499,15 @@ def main() -> None:
                     code_corpus=st.session_state["github_code_corpus"],
                 )
 
+            # The model reasons before it speaks, so the first token can take
+            # many seconds; keep the slot alive until it lands (the first
+            # streamed token repaints it).
+            slot.markdown(
+                f"*Reasoning with {reasoning_effort} effort…*"
+                if reasoning_effort
+                else "*Waiting for the model's reply…*"
+            )
+
             with ThreadPoolExecutor(max_workers=1) as pool:
                 guard_future = pool.submit(guard.check, prompt)
                 try:
