@@ -6,6 +6,9 @@
 >
 > Diagrams here follow the principles in [`DIAGRAMS.md`](DIAGRAMS.md): one story
 > per diagram, sequence diagrams for temporal flows, ~7±2 boxes each.
+>
+> **Note:** these diagrams are automatically AI-generated and only lightly
+> reviewed — when a detail matters, verify it against the code.
 
 Six views, from most dynamic to most static. Shared conventions: **dotted
 arrows** = network calls to OpenRouter, **solid arrows** = in-process;
