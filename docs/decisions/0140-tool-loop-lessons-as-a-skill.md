@@ -38,13 +38,33 @@ added to `CLAUDE.md`: skill descriptions are already in context, so a pointer
 there would be redundant, and the project-specific version of this knowledge
 already lives in ADR-0130 and REQUIREMENTS §19.
 
+**The skill addresses the harness, not the model.** It tells a developer (or a
+coding agent) how to shape tool results, control flow, provenance checks, and
+fault-injection tests — code decisions, all verifiable. Exactly one item is
+prompt-side, because no harness can supply it: licensing an honest "I could not
+get it."
+
 **The skill is a synthesis, not a memoir.** Our own episodes are one data point;
-the literature had already measured the central phenomenon. `SKILL.md` carries
-the operational guidance and `references/evidence.md` carries the citations,
-with every claim tiered as **measured**, **vendor guidance**, or **reasoned
-hypothesis**. Two mechanisms are ours alone and marked as hypotheses — that
-forcing output while withdrawing tools manufactures fabrication, and that a tool
-call typed as prose can be read as the answer.
+the literature had already measured the central phenomenon, and reading it
+changed the content materially. `SKILL.md` carries the operational guidance and
+`references/evidence.md` carries the citations, with every claim tiered as
+**measured**, **practice**, or **hypothesis**.
+
+Two claims we initially took to be ours did not survive the reading, and saying
+so is the point of the tiering:
+
+- **Provenance checking is established practice**, not our invention — it ships
+  as off-the-shelf validators, and there is published work applying it to MCP
+  agents specifically. Our string-matching version is its cheapest tier.
+- **A model writing the tool's reply itself is a long-known problem** in
+  text-protocol (ReAct-style) loops, solved there with a stop sequence on the
+  observation marker. What is genuinely specific to native function calling is
+  that no such marker exists, so the failure reappears in the content channel and
+  the harness must detect it instead.
+
+One hypothesis remains ours: that forcing output while withdrawing the means to
+ground it manufactures fabrication. No reviewed work isolates budget exhaustion
+as a fabrication cause, and it is labelled accordingly.
 
 **`.gitignore` had to change for this to mean anything.** `.claude/` was ignored
 wholesale, so a project skill would have been invisible to git — the decision
@@ -57,6 +77,15 @@ Local state (`settings.local.json`, `worktrees/`, `.cc-writes/`) stays ignored.
 prose and final answer when calls have failed or run out. It excludes tool-name
 hallucination, unnecessary tool use, result-ignoring, and multi-turn recovery,
 which are different failures with their own literature.
+
+**Reasoning effort is deferred, not recommended.** It was our single most
+effective fix, but published work finds that strengthening reasoning *increases*
+tool-*selection* hallucination — a different class from the one this skill
+covers, measured on different benchmarks. Rather than offer a lever we cannot
+bound, the skill records the tension and marks it for revisiting. Narrow scope is
+what makes that possible: findings here are strongly class-dependent, and a skill
+treating "tool hallucination" as one thing would recommend more reasoning in one
+breath and warn against it in the next.
 
 ## Trade-off accepted
 
@@ -74,7 +103,14 @@ which are different failures with their own literature.
   raising reasoning effort — is exactly the axis the studies under-cover. The
   evidence file states this, and the numbers are framed as showing the failure
   modes are structural rather than as constants to engineer against.
-- **We are asserting two unattested mechanisms.** Publishing a hypothesis as
-  guidance risks propagating something wrong. Mitigated only by labelling: both
-  carry the worked example that produced them and an explicit note that no paper
-  reviewed isolates them.
+- **We are asserting one unattested mechanism.** Publishing a hypothesis as
+  guidance risks propagating something wrong. Mitigated only by labelling: it
+  carries the worked example that produced it and an explicit note that no
+  reviewed work isolates it.
+- **The verification tiers are recommended without having been run.** §4 offers
+  embedding- and entailment-based provenance checking above our string matching,
+  citing sizes and accuracies from their sources. Only the cheapest tier is
+  battle-tested here; the other two are read about, not used.
+- **The skill has never guided a second integration.** It is written from
+  evidence and one project. The first real test is whether §1's triage ordering
+  holds when the next harness misbehaves.
