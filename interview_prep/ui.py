@@ -101,6 +101,23 @@ def render_document_uploader(key: str = "doc_uploader"):
     )
 
 
+def render_loop_selector() -> None:
+    """Render the tool-loop picker (bound to ``agent_loop``).
+
+    Both loops answer to the same contract and drive the same ToolBox, so this
+    changes how the turn is orchestrated and nothing about what the tools do.
+    """
+    st.checkbox(
+        "Use the LangChain agent loop",
+        key="agent_loop",
+        help=(
+            "Runs the turn through LangChain's create_agent (a compiled "
+            "LangGraph) instead of the hand-rolled tool loop. Same tools, "
+            "same budget, same safeguards — takes effect on the next message."
+        ),
+    )
+
+
 def render_embedding_selector(models: list[str]) -> None:
     """Render the embedding-model picker (bound to ``embedding_model``).
 

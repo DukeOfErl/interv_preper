@@ -10,6 +10,12 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
+### Added
+- An alternative tool loop built on LangChain's `create_agent`, selectable from
+  the **Developer** tab ("Use the LangChain agent loop"). It drives the same
+  tools, budget and safeguards as the hand-rolled loop; the hand-rolled one
+  remains the default.
+
 ### Changed
 - The wait before a reply starts streaming is no longer a bare spinner: the
   assistant slot shows *Reasoning with low/medium/high effort…* (or *Waiting

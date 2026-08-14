@@ -126,6 +126,14 @@ GITHUB_MCP_ARG_OVERRIDES = {
 # the part that is actually relevant instead of merely the part that is first.
 GITHUB_FILE_INLINE_CHARS = 12000
 
+# Which tool loop drives a turn. Both implement the same contract and share the
+# same ToolBox — the hand-rolled ``InterviewLLM`` and the LangChain
+# ``AgentLLM`` (ADR-0150). The toggle is a Developer-tab control rather than a
+# constant because the point of keeping both is comparing them on the same
+# conversation; the hand-rolled loop stays the default as the one with field
+# mileage behind it.
+DEFAULT_AGENT_LOOP = False
+
 # Reasoning effort presets, offered in the sidebar only when the active model is
 # a reasoning model. Ordered low→high; sent to OpenRouter as
 # ``reasoning.effort``. These three levels are accepted for every reasoning

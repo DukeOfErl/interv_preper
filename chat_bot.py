@@ -6,15 +6,18 @@ This module only wires together the pieces in the ``interview_prep`` package
 and drives the Streamlit chat loop.
 """
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import streamlit as st
 from openai import APIError, AuthenticationError
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from interview_prep.config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_AGENT_LOOP,
     DEFAULT_REASONING_EFFORT,
     EMBEDDING_MODELS,
     GUARDRAIL_DOC_MODEL,
@@ -46,6 +49,7 @@ from interview_prep.ingest import (
     should_ingest,
 )
 from interview_prep.knowledgebase import KnowledgeBase
+from interview_prep.agent import AgentLLM
 from interview_prep.llm import InterviewLLM
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
 from interview_prep.prompts import (
@@ -69,6 +73,7 @@ from interview_prep.ui import (
     render_document_uploader,
     render_documents_panel,
     render_embedding_selector,
+    render_loop_selector,
     render_evaluations_tab,
     render_history,
     render_knowledgebase_panel,
@@ -81,6 +86,29 @@ from interview_prep.ui import (
     render_warnings_log,
     render_web_sources_panel,
 )
+
+
+def in_script_thread(callback):
+    """Let a callback touch Streamlit from a worker thread.
+
+    The LangChain loop runs its model and tool nodes on a ThreadPoolExecutor,
+    and Streamlit's script context is thread-local: an ``st.*`` call from one
+    of those threads raises ``NoSessionContext``. Observed live — every GitHub
+    tool call came back to the model as "failed after 3 attempts", and the
+    status line never moved, because painting the progress slot was what
+    threw. Capturing the context here (on the script thread) and re-attaching
+    it inside the callback fixes both.
+
+    A no-op for the hand-rolled loop, which already calls tools inline, so
+    both loops keep one code path.
+    """
+    ctx = get_script_run_ctx()
+
+    def wrapper(*args, **kwargs):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        return callback(*args, **kwargs)
+
+    return wrapper
 
 
 def record_warning(name, kind, reason=""):
@@ -257,6 +285,7 @@ def main() -> None:
     # checked against what was actually fetched.
     st.session_state.setdefault("github_code_corpus", [])
     st.session_state.setdefault("github_hint_shown", False)
+    st.session_state.setdefault("agent_loop", DEFAULT_AGENT_LOOP)
     st.session_state.setdefault("prompt_source_key", default_source(sources).key)
     # A stored key can go stale if a source is renamed/removed between runs;
     # reset it before the widget renders, since the selectbox requires its bound
@@ -339,6 +368,7 @@ def main() -> None:
         render_evaluations_tab(st.session_state["evaluation_cards"])
 
     with dev_tab:
+        render_loop_selector()
         render_embedding_selector(EMBEDDING_MODELS)
         render_sidebar(library, usage, spend)
         render_retrieval_panel(
@@ -433,7 +463,10 @@ def main() -> None:
             effective_prompt = system_prompt
 
         guard = JailbreakGuard(api_key=api_key)
-        llm = InterviewLLM(
+        # The two loops are interchangeable by construction: same constructor,
+        # same stream_reply contract, same ToolBox below them (ADR-0150).
+        loop = AgentLLM if st.session_state["agent_loop"] else InterviewLLM
+        llm = loop(
             api_key=api_key, model=model, reasoning_effort=reasoning_effort
         )
         pending = messages + [{"role": "user", "content": prompt}]
@@ -491,9 +524,11 @@ def main() -> None:
                     guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
                     index=doc_index,
                     cache=st.session_state["web_research_cache"],
-                    on_warning=record_warning,
-                    on_progress=show_progress,
-                    on_document=register_document,
+                    # These three touch Streamlit, and the agent loop runs
+                    # tools off the script thread — see in_script_thread.
+                    on_warning=in_script_thread(record_warning),
+                    on_progress=in_script_thread(show_progress),
+                    on_document=in_script_thread(register_document),
                     mcp=github_mcp,
                     seen_terms=st.session_state["github_seen_terms"],
                     code_corpus=st.session_state["github_code_corpus"],
