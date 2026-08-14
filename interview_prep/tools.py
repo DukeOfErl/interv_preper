@@ -75,6 +75,32 @@ def looks_like_feedback(reply_text) -> bool:
     return scored >= 3
 
 
+def _never_fatal(callback):
+    """Stop a reporting callback from being able to break a tool.
+
+    ``run()`` promises never to raise, but the progress and warning hooks fire
+    from several places outside its try blocks — so a callback that throws
+    escapes as a tool failure. Observed live: under the LangChain loop, tool
+    nodes execute on a ThreadPoolExecutor thread, Streamlit's context is
+    thread-local, and ``on_progress`` painting a status line raised
+    ``NoSessionContext``. A working GitHub call was reported to the model as
+    "failed after 3 attempts" — the retry middleware faithfully repeating a
+    failure that was ours, not the server's.
+
+    The caller is responsible for making its callbacks work (chat_bot
+    re-attaches the Streamlit context); this only ensures the blast radius of
+    getting that wrong is a missing status line rather than a dead tool.
+    """
+
+    def guarded(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except Exception:
+            return None
+
+    return guarded
+
+
 class ToolBox:
     """The tools available for one turn, bound to that turn's live state.
 
@@ -123,12 +149,14 @@ class ToolBox:
         # can register it in the session's document list — otherwise the doc
         # is invisible to the Documents panel and lost when an embedding-model
         # switch rebuilds the index from that list.
-        self._on_document = on_document or (lambda doc: None)
+        self._on_document = _never_fatal(on_document or (lambda doc: None))
         # Session-scoped cache: normalized query -> bullets already returned.
         # A chatty model will otherwise re-search the same company mid-session.
         self._cache = cache if cache is not None else {}
-        self._on_warning = on_warning or (lambda name, kind, reason="": None)
-        self._on_progress = on_progress or (lambda message: None)
+        self._on_warning = _never_fatal(
+            on_warning or (lambda name, kind, reason="": None)
+        )
+        self._on_progress = _never_fatal(on_progress or (lambda message: None))
         self.extra_cost = 0.0
         # Citations from every research call this turn, for the sources panel.
         self.citations = []
