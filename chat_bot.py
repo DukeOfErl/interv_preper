@@ -6,11 +6,13 @@ This module only wires together the pieces in the ``interview_prep`` package
 and drives the Streamlit chat loop.
 """
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import streamlit as st
 from openai import APIError, AuthenticationError
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from interview_prep.config import (
     DEFAULT_EMBEDDING_MODEL,
@@ -46,7 +48,7 @@ from interview_prep.ingest import (
     should_ingest,
 )
 from interview_prep.knowledgebase import KnowledgeBase
-from interview_prep.llm import InterviewLLM
+from interview_prep.agent import InterviewAgent
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
 from interview_prep.prompts import (
     PromptLibrary,
@@ -59,7 +61,8 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
-from interview_prep.tools import ToolBox, looks_like_feedback
+from interview_prep.policy import ContentPolicy
+from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
 from interview_prep.ui import (
     warning_message,
@@ -81,6 +84,31 @@ from interview_prep.ui import (
     render_warnings_log,
     render_web_sources_panel,
 )
+
+
+def in_script_thread(callback):
+    """Let a callback touch Streamlit from a worker thread.
+
+    ``create_agent`` runs its model and tool nodes on a ThreadPoolExecutor, and
+    Streamlit's script context is thread-local: an ``st.*`` call from one of
+    those threads raises ``NoSessionContext``. Observed live — every GitHub
+    tool call came back to the model as "failed after 3 attempts", and the
+    status line never moved, because painting the progress slot was what threw.
+
+    Progress no longer needs this: tools emit it through
+    ``runtime.stream_writer`` and it is rendered from the stream, on this
+    thread. Warnings and document registrations still do, because the policy
+    middleware raises them from inside ``wrap_tool_call`` — on the worker
+    thread. Routing those through the stream too would remove the last of this,
+    and is the obvious next simplification.
+    """
+    ctx = get_script_run_ctx()
+
+    def wrapper(*args, **kwargs):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        return callback(*args, **kwargs)
+
+    return wrapper
 
 
 def record_warning(name, kind, reason=""):
@@ -433,7 +461,7 @@ def main() -> None:
             effective_prompt = system_prompt
 
         guard = JailbreakGuard(api_key=api_key)
-        llm = InterviewLLM(
+        llm = InterviewAgent(
             api_key=api_key, model=model, reasoning_effort=reasoning_effort
         )
         pending = messages + [{"role": "user", "content": prompt}]
@@ -447,13 +475,15 @@ def main() -> None:
             # Tools are offered only to grounding-aware sources: the research
             # tool indexes its raw excerpts for retrieval, which presumes the
             # RAG pipeline the source opted into.
-            toolbox = None
+            tools, policy, mcp_names = (), None, set()
             if library.is_grounding_aware:
 
                 def show_progress(message):
                     # A research hop streams no tokens for many seconds; keep
                     # the slot alive with a status line appended to whatever
-                    # has already streamed.
+                    # has already streamed. Called from the stream loop below,
+                    # on this thread — tools emit progress through
+                    # runtime.stream_writer rather than touching Streamlit.
                     streamed = "".join(reply_parts)
                     slot.markdown(f"{streamed}\n\n*{message}*" if streamed else f"*{message}*")
 
@@ -465,7 +495,7 @@ def main() -> None:
                     docs[:] = [d for d in docs if d.name != doc.name]
                     docs.append(doc)
 
-                # GitHub portfolio tools (MCP) ride in the same toolbox. The
+                # GitHub portfolio tools (MCP) join the same tool list. The
                 # tools/list discovery round-trip runs once per session; its
                 # converted schemas are cached in session state. A discovery
                 # failure warns and caches an empty list, so the session
@@ -486,18 +516,20 @@ def main() -> None:
                     if cached_specs:
                         github_mcp = GitHubMCP(pat=pat, specs=cached_specs)
 
-                toolbox = ToolBox(
-                    researcher=WebResearcher(api_key=api_key),
+                policy = ContentPolicy(
                     guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
                     index=doc_index,
-                    cache=st.session_state["web_research_cache"],
-                    on_warning=record_warning,
-                    on_progress=show_progress,
-                    on_document=register_document,
-                    mcp=github_mcp,
-                    seen_terms=st.session_state["github_seen_terms"],
-                    code_corpus=st.session_state["github_code_corpus"],
+                    # Raised from inside wrap_tool_call, i.e. off the script
+                    # thread — see in_script_thread.
+                    on_warning=in_script_thread(record_warning),
+                    on_document=in_script_thread(register_document),
                 )
+                tools = build_tools(
+                    researcher=WebResearcher(api_key=api_key),
+                    cache=st.session_state["web_research_cache"],
+                    mcp=github_mcp,
+                )
+                mcp_names = github_mcp.tool_names if github_mcp else set()
 
             # The model reasons before it speaks, so the first token can take
             # many seconds; keep the slot alive until it lands (the first
@@ -512,7 +544,15 @@ def main() -> None:
                 guard_future = pool.submit(guard.check, prompt)
                 try:
                     for token in llm.stream_reply(
-                        effective_prompt, pending, toolbox=toolbox
+                        effective_prompt,
+                        pending,
+                        tools=tools,
+                        policy=policy,
+                        mcp_names=mcp_names,
+                        seen_terms=st.session_state["github_seen_terms"],
+                        code_corpus=st.session_state["github_code_corpus"],
+                        on_warning=in_script_thread(record_warning),
+                        on_progress=show_progress if tools else None,
                     ):
                         reply_parts.append(token)
                         slot.markdown("".join(reply_parts))
@@ -593,19 +633,19 @@ def main() -> None:
         # A deep-dive is a multi-step tool workflow, and it degrades badly below
         # "high" effort — tell the user once, after a turn that actually used
         # the GitHub tools, so the advice arrives with the evidence for it.
-        if toolbox is not None and not st.session_state["github_hint_shown"]:
-            hint = github_effort_hint(toolbox.mcp_calls, reasoning_effort)
+        if tools and not st.session_state["github_hint_shown"]:
+            hint = github_effort_hint(llm.mcp_calls, reasoning_effort)
             if hint:
                 st.session_state["flash_notices"].append(hint)
                 st.session_state["github_hint_shown"] = True
-        if toolbox is not None and toolbox.citations:
-            st.session_state["web_sources"] = list(toolbox.citations)
+        if llm.citations:
+            st.session_state["web_sources"] = list(llm.citations)
         # Evaluation cards commit only on an allowed, completed turn — the
-        # toolbox accumulated them during the stream, but a turn the guardrail
-        # blocks persists nothing, cards included.
-        if toolbox is not None:
-            st.session_state["evaluation_cards"].extend(toolbox.evaluations)
-            if looks_like_feedback(assistant_reply) and not toolbox.evaluations:
+        # turn's graph state accumulated them during the stream, but a turn the
+        # guardrail blocks persists nothing, cards included.
+        if tools:
+            st.session_state["evaluation_cards"].extend(llm.evaluations)
+            if looks_like_feedback(assistant_reply) and not llm.evaluations:
                 # The reply reads like scored answer feedback, but no card was
                 # recorded — the model skipped the record_evaluation call. The
                 # user-facing text lives in ui.warning_message.
@@ -626,9 +666,8 @@ def main() -> None:
                     estimate_text_tokens(assistant_reply),
                 )
         # Tool sub-completions (web research) bill separately from the main
-        # stream's usage chunks; the toolbox accumulated their reported cost.
-        if toolbox is not None:
-            cost += toolbox.extra_cost
+        # stream's usage chunks; the turn's state accumulated their cost.
+        cost += llm.extra_cost
         st.session_state["total_cost"] += cost
 
         # Record the reasoning tokens this turn spent so the next-prompt estimate

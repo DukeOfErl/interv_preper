@@ -10,10 +10,10 @@
 > **Note:** these diagrams are automatically AI-generated and only lightly
 > reviewed — when a detail matters, verify it against the code.
 
-Six views, from most dynamic to most static. Shared conventions: **dotted
-arrows** = network calls to OpenRouter, **solid arrows** = in-process;
+Seven views, from most dynamic to most static. Shared conventions: **dotted
 arrows** = network calls to an external API, **solid arrows** = in-process;
-**orange** = external API, **blue** = markdown prompt files.
+**orange** = external API, **blue** = markdown prompt files. (Diagram 4 is a
+graph rather than a flow, and uses dotted arrows for conditional edges.)
 
 ## 1. A chat turn
 
@@ -26,7 +26,7 @@ sequenceDiagram
     participant CB as chat loop<br/>(chat_bot.py)
     participant R as DocumentIndex +<br/>KnowledgeBase
     participant G as JailbreakGuard<br/>(guardrails.py)
-    participant L as InterviewLLM<br/>(llm.py)
+    participant L as InterviewAgent<br/>(agent.py)
 
     U->>CB: prompt
     opt grounding-aware source & anything indexed (uploads or knowledge base)
@@ -69,22 +69,24 @@ final step and rendered in the Evaluations tab.
 sequenceDiagram
     autonumber
     actor U as User
-    participant L as InterviewLLM<br/>(llm.py)
-    participant T as ToolBox<br/>(tools.py)
+    participant L as InterviewAgent<br/>(agent.py)
+    participant T as web_research tool<br/>(tools.py)
     participant W as WebResearcher<br/>(web_research.py)
+    participant P as policy middleware<br/>(middleware.py)
     participant G as JailbreakGuard<br/>(guardrails.py)
     participant R as DocumentIndex<br/>(retrieval.py)
 
     U->>L: "please research Acme Corp"
     L-->>L: hop 1 (OpenRouter, stream) →<br/>tool call, no text
-    L->>T: run web_research(query, topic)
+    L->>T: web_research(query, topic)
     T->>W: research(query)
     W-->>W: sub-completion with web plugin<br/>(OpenRouter, quarantined model)
     W->>T: cited bullets + raw excerpts
-    T->>G: scan bullets (fails closed)
-    T->>G: scan raw excerpts (fails closed)
-    T->>R: index excerpts as "web search" doc<br/>(topic = provenance)
-    T->>L: bullets (or error string)
+    T->>P: ToolOutcome on the artifact channel<br/>(content = placeholder)
+    P->>G: scan bullets (fails closed)
+    P->>G: scan raw excerpts (fails closed)
+    P->>R: index excerpts as "web search" doc<br/>(topic = provenance)
+    P->>L: bullets as the tool message<br/>(or a refusal the model can read)
     L-->>L: hop 2 (OpenRouter, stream)
     L->>U: cited reply, typewriter-style
 ```
@@ -93,6 +95,12 @@ Key points: the interviewer never sees raw web pages — only the sub-call's
 screened bullets (dual-LLM quarantine; ADR-0100); both scans fail **closed**
 like document ingestion; the indexed excerpts let diagram 1's retrieval serve
 follow-up turns without a new search.
+
+Note where the screen sits. The tool **describes** what it fetched and puts a
+placeholder in the text the model would read; the policy middleware decides
+what actually becomes the tool message (ADR-0150). Screening is therefore not
+something a tool can forget to do, and sources reach the panel only for a
+digest that was admitted.
 
 ## 3. A GitHub portfolio turn (MCP)
 
@@ -104,23 +112,25 @@ server** — the app only discovers and relays them (ADR-0130).
 sequenceDiagram
     autonumber
     actor U as User
-    participant L as InterviewLLM<br/>(llm.py)
-    participant T as ToolBox<br/>(tools.py)
+    participant L as InterviewAgent<br/>(agent.py)
+    participant T as relaying tool<br/>(tools.py)
     participant M as GitHubMCP<br/>(github_mcp.py)
+    participant P as policy middleware<br/>(middleware.py)
     participant S as GitHub MCP server<br/>(api.githubcopilot.com)
     participant G as JailbreakGuard<br/>(guardrails.py)
     participant R as DocumentIndex<br/>(retrieval.py)
 
     Note over M,S: once per session, first turn:<br/>tools/list → read-only allowlist → cached specs
     U->>L: "my GitHub is octocat" (after consenting)
-    L->>T: run get_file_contents(owner, repo, path)
+    L->>T: get_file_contents(owner, repo, path)
     T->>M: call(name, args)
     M->>S: tools/call (fresh connection, PAT,<br/>compact-output args forced)
     S->>M: file body (embedded resource)
     M->>T: MCPResult: inline text + file_text + terms
-    T->>G: scan file as "code" (fails closed)
-    T->>R: index as "github" doc<br/>(owner/repo/path)
-    T->>L: bounded excerpt (or error string — never raises)
+    T->>P: ToolOutcome on the artifact channel
+    P->>G: scan as "code" (fails closed)<br/>listings too — a file *name* is text
+    P->>R: index as "github" doc<br/>(owner/repo/path)
+    P->>L: bounded excerpt + provenance recorded<br/>(or a refusal — never raises)
     L->>U: grounded question about the real code
     Note over L,U: after the reply: names it claims are<br/>checked against terms → warning if invented
 ```
@@ -132,7 +142,64 @@ file body never enters the conversation whole — it is screened, indexed, and
 excerpted, so diagram 1's retrieval carries the rest into later turns
 (ADR-0130).
 
-## 4. Document ingestion
+## 4. The agent graph
+
+*What does the loop those two turns run on actually look like?* Diagrams 2 and
+3 tell the tool story in time; this is the control flow underneath both.
+
+**Generated from the compiled agent** — `agent.get_graph().draw_mermaid()` on
+what `create_agent` returns — not drawn by hand. Regenerate it after any change
+to the middleware list; the nodes and edges are chosen by `create_agent` from
+that list, so this is the one artefact that shows what was built rather than
+what was intended.
+
+```mermaid
+graph TD
+    START([__start__]):::se
+    ANN["announce_exhausted_tools<br/>· before_model"]
+    MODEL["model"]
+    LIMIT["ToolCallLimitMiddleware<br/>· after_model"]
+    TYPED["catch_typed_tool_call_hook<br/>· after_model"]
+    TOOLS["tools"]
+    END([__end__]):::se
+
+    START --> ANN
+    ANN --> MODEL
+    MODEL --> LIMIT
+    LIMIT -.-> TYPED
+    LIMIT -.-> END
+    TYPED -.->|"tool calls requested"| TOOLS
+    TYPED -.->|"jump_to: model<br/>(typed call caught)"| ANN
+    TYPED -.-> END
+    TOOLS -.-> ANN
+
+    classDef se fill:#bfb6fc,stroke:#5b4fc7,color:#000
+```
+
+**Two of our five middleware are not nodes.** `content_policy_middleware` and
+`ToolRetryMiddleware` are `wrap_tool_call` hooks: they wrap the `tools` node
+rather than sitting beside it, so the graph cannot show them. Their nesting —
+first in the middleware list is outermost — is the part that matters:
+
+```
+tools node
+└── content_policy_middleware    screens, admits, records provenance
+    └── ToolRetryMiddleware      retries with backoff, then on_failure
+        └── the tool function
+```
+
+That layering is load-bearing. A `try/except` *inside* a tool sits below the
+innermost layer, so nothing above ever sees the exception — which is exactly
+how a configured retry policy silently did nothing (ADR-0170).
+
+Two more things the picture corrects. `after_model` hooks run in **reverse**
+list order, so the budget check lands before the typed-call check. And
+`jump_to: "model"` does not arrive at `model`: it lands on
+`announce_exhausted_tools.before_model`, because `before_model` hooks always
+run before the model — so a corrected retry has its exhaustion note
+re-evaluated.
+
+## 5. Document ingestion
 
 *What happens when the user drops a file into the sidebar?*
 
@@ -153,7 +220,7 @@ Note the polarity: this scan **fails closed** per document (no clean scan → no
 ingestion), the opposite of the per-turn chat guardrail, which fails open so a
 classifier outage never blocks the conversation.
 
-## 5. Knowledge-base startup sync
+## 6. Knowledge-base startup sync
 
 *How does the persistent knowledge base stay in step with its seed files?*
 (Runs once per session, and again when the embedding model changes.)
@@ -180,7 +247,7 @@ is a derived artifact (delete it and it rebuilds); a warm start makes zero
 network calls; switching back to a previously used embedding model re-embeds
 nothing (ADR-0110).
 
-## 6. Module map
+## 7. Module map
 
 *What are the parts, and what depends on what?* Static structure only — no
 runtime edges (those are diagrams 1–5).
@@ -194,8 +261,8 @@ flowchart TB
         promptsC["prompt composition<br/>prompts.py · config.py"]
         rag["document RAG + knowledge base<br/>ingest.py · retrieval.py · knowledgebase.py"]
         safety["guardrail<br/>guardrails.py"]
-        llmC["LLM + accounting<br/>llm.py · pricing.py · context.py"]
-        toolsC["tools<br/>tools.py · web_research.py · github_mcp.py"]
+        llmC["agent + accounting<br/>agent.py · middleware.py · pricing.py · context.py"]
+        toolsC["tools + policy<br/>tools.py · policy.py · web_research.py · github_mcp.py"]
         uiC["rendering<br/>ui.py"]
     end
 

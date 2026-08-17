@@ -177,6 +177,13 @@ def warning_message(entry) -> str:
             "It may be the interviewer's own illustration — but if it was "
             "presented as your code, treat it as invented."
         )
+    if entry["kind"] == "github listing blocked":
+        return (
+            f"A repository listing for `{entry['name']}` was withheld by the "
+            "safety scan"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+            + " File and folder names are read by the interviewer too."
+        )
     if entry["kind"] == "github file blocked":
         return (
             f"`{entry['name']}` was withheld by the safety scan"

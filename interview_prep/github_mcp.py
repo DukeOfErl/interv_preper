@@ -23,11 +23,11 @@ Design notes:
     sentence is appended to every forwarded tool description, because the
     description is the only thing that makes the model decide to call it.
   * **Results are split, not just returned** (``MCPResult``): a fetched file's
-    body is handed back separately from the inline text so ``ToolBox`` can
+    body is handed back separately from the inline text so the tool layer can
     screen and index it as a document rather than pour it into the
     conversation. The same result reports every repo path it revealed, which
     feeds the fabrication check below.
-  * ``call()`` may raise (network, auth, unknown tool) — ``ToolBox.run``
+  * ``call()`` may raise (network, auth, unknown tool) — the relaying tool
     wraps it into an error string to preserve its never-raise contract.
 
 **Why the fabrication check exists.** Observed in testing: a model that had
@@ -41,6 +41,7 @@ reply names against what the tools actually returned.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -134,7 +135,7 @@ class GitHubMCP:
 
     @property
     def tool_names(self):
-        """The forwarded tool names, for dispatch routing in ``ToolBox.run``."""
+        """The forwarded tool names, for counting MCP calls in the middleware."""
         return {spec["function"]["name"] for spec in self.specs}
 
     def discover(self):
@@ -153,7 +154,7 @@ class GitHubMCP:
         """Relay one tool call to the server and split up what came back.
 
         ``arguments`` is the already-parsed dict of model-supplied arguments;
-        ``GITHUB_MCP_ARG_OVERRIDES`` wins over it. May raise — the ToolBox
+        ``GITHUB_MCP_ARG_OVERRIDES`` wins over it. May raise — the tool
         wraps failures into error strings.
         """
         arguments = arguments if isinstance(arguments, dict) else {}
@@ -169,7 +170,7 @@ class GitHubMCP:
                 # A fetched file's body arrives as an embedded resource; the
                 # text block alongside it only says "successfully downloaded".
                 bodies.append(getattr(block.resource, "text", "") or "")
-        text = "\n".join(part for part in inline if part)
+        text = _drop_directory_sizes("\n".join(part for part in inline if part))
 
         if result.is_error:
             return MCPResult(
@@ -278,6 +279,36 @@ class GitHubMCP:
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     return await session.call_tool(name, arguments)
+
+
+def _drop_directory_sizes(text):
+    """Remove the ``size`` field from directory entries in a listing.
+
+    We ask for ``fields: [type, name, path, size]`` to keep listings compact,
+    and GitHub answers ``"size": 0`` for every directory — the field is simply
+    not meaningful for one. Observed live: a model read ``{"name":"test",
+    "size":0,"type":"dir"}`` and reported the test directory as *empty*, which
+    is a claim the listing never made.
+
+    A zero we supplied that reads as evidence is worse than a missing field, so
+    it is dropped for directories and kept for files, where the model uses it
+    to judge what is worth opening.
+    """
+    if '"type":"dir"' not in text.replace(" ", ""):
+        return text
+    try:
+        entries = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    if not isinstance(entries, list):
+        return text
+    cleaned = [
+        {k: v for k, v in entry.items() if not (k == "size" and entry.get("type") == "dir")}
+        if isinstance(entry, dict)
+        else entry
+        for entry in entries
+    ]
+    return json.dumps(cleaned, separators=(",", ":"))
 
 
 def unverified_references(reply, seen_terms):

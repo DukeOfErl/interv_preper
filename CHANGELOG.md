@@ -11,6 +11,16 @@ any release; `1.0.0` when it stabilizes.
 ## [Unreleased]
 
 ### Changed
+- The interviewer's turn now runs on **LangChain's agent** rather than a
+  hand-rolled tool loop (ADR-0170). Same tools, same budget, same safeguards —
+  but tool progress ("Checking GitHub: …") is now reliable, where it could
+  previously stall and report failures that had not happened.
+- Repository **listings and search results are now safety-scanned** before the
+  interviewer reads them, like fetched files already were. File and folder
+  names are written by whoever owns the repository, and the interviewer reads
+  them as literally as it reads code. A blocked listing is reported in the
+  Warnings tab and the interviewer asks you to name a file instead
+  (ADR-0150).
 - The wait before a reply starts streaming is no longer a bare spinner: the
   assistant slot shows *Reasoning with low/medium/high effort…* (or *Waiting
   for the model's reply…* for non-reasoning models) until the first token
