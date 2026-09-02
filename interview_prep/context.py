@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from urllib import error, request
+from http.client import HTTPException
+from urllib import request
 
 import streamlit as st
 
@@ -30,7 +31,16 @@ def fetch_openrouter_models(api_key):
     try:
         with request.urlopen(req, timeout=8) as api_result_handle:
             payload = json.loads(api_result_handle.read().decode("utf-8"))
-    except (error.URLError, error.HTTPError, TimeoutError, json.JSONDecodeError):
+    except (OSError, HTTPException, ValueError):
+        # Caught by base class deliberately, not by enumeration. The three
+        # bases cover every way this call has been seen to fail: transport
+        # (URLError, HTTPError, TimeoutError, ConnectionResetError — all
+        # OSError), a truncated chunked response (IncompleteRead, an
+        # HTTPException and *not* an OSError), and an unreadable body
+        # (JSONDecodeError, UnicodeDecodeError — both ValueError). An earlier
+        # hand-listed tuple missed the last two families while the docstring
+        # already promised "any failure", so a flaky connection crashed the
+        # page instead of degrading it per R14.2.
         return []
 
     return payload.get("data", []) if isinstance(payload, dict) else []

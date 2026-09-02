@@ -1,3 +1,7 @@
+import json
+from http.client import IncompleteRead
+from urllib import error
+
 import pytest
 
 from interview_prep import context
@@ -6,6 +10,7 @@ from interview_prep.context import (
     compute_context_usage,
     estimate_prompt_tokens,
     estimate_text_tokens,
+    fetch_openrouter_models,
     get_model_context_window,
     model_supports_reasoning,
     predict_next_call_tokens,
@@ -194,3 +199,62 @@ def test_compute_context_usage(monkeypatch):
     assert usage.window == 1000
     assert usage.source == "OpenRouter"
     assert usage.used_tokens == estimate_prompt_tokens("abcd", [])
+
+
+# --- catalog fetch: the contract is that it never raises ---------------------
+#
+# R14.2 requires graceful degradation when the catalog is unavailable: the
+# reasoning selector hides, the window is unknown, pricing falls back to zero.
+# Everything downstream is written against `fetch_openrouter_models`'
+# docstring — "Returns [] on any failure" — so an exception escaping it takes
+# the page down instead of degrading it.
+#
+# Found by adding `--cov=chat_bot`: the extra instrumentation slowed a run
+# enough for OpenRouter's chunked response to truncate, and
+# `http.client.IncompleteRead` was not among the four types the handler listed.
+# The three families below reach the caller through three different base
+# classes, which is why enumerating types by hand was the wrong shape.
+
+CATALOG_FAILURES = [
+    pytest.param(error.URLError("no route to host"), id="url-error"),
+    pytest.param(error.HTTPError("u", 500, "server error", {}, None), id="http-error"),
+    pytest.param(TimeoutError("timed out"), id="timeout"),
+    pytest.param(ConnectionResetError("peer reset"), id="connection-reset"),
+    pytest.param(IncompleteRead(b"partial"), id="incomplete-read"),
+    pytest.param(json.JSONDecodeError("no json", "doc", 0), id="undecodable-json"),
+    pytest.param(
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"), id="bad-encoding"
+    ),
+]
+
+
+@pytest.fixture
+def uncached_catalog():
+    """`fetch_openrouter_models` is `st.cache_data`-wrapped; clear it per test.
+
+    Without this the first result is memoised and every later case asserts
+    against the cache instead of against the code.
+    """
+    fetch_openrouter_models.clear()
+    yield
+    fetch_openrouter_models.clear()
+
+
+@pytest.mark.parametrize("failure", CATALOG_FAILURES)
+def test_the_catalog_returns_empty_on_any_transport_or_decode_failure(
+    monkeypatch, uncached_catalog, failure
+):
+    def exploding_urlopen(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(context.request, "urlopen", exploding_urlopen)
+    assert fetch_openrouter_models("sk-irrelevant") == []
+
+
+def test_no_key_means_no_catalog_call_at_all(monkeypatch, uncached_catalog):
+    def forbidden_urlopen(*args, **kwargs):
+        raise AssertionError("must not reach the network without a key")
+
+    monkeypatch.setattr(context.request, "urlopen", forbidden_urlopen)
+    assert fetch_openrouter_models("") == []
+    assert fetch_openrouter_models(None) == []

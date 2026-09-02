@@ -1,15 +1,18 @@
 """The role gate as the app actually wires it (R20.10, R20.8).
 
 `permissions.py` is covered thoroughly by `test_permissions.py`, but the
-expression that *consults* it lives in `chat_bot.py` — which no other test
-imports, and which coverage does not measure (`--cov=interview_prep`). A
-regression that made the gate fail open, or made the identity adapter read
-`session_state`, would leave every other test in the suite green. That blind
-spot was found by the WP1 red-team pass, not by the tests.
+expression that *consults* it lives in `chat_bot.py`, which no other test
+imports. A regression that made the gate fail open, or made the identity
+adapter read `session_state`, would leave every other test in the suite green.
+That blind spot was found by the WP1 red-team pass, not by the tests — and it
+was invisible in the coverage report, because `chat_bot.py` was outside
+`--cov=interview_prep` and so absent from the denominator rather than showing
+as uncovered. It is now measured explicitly.
 
-These run offline. The app degrades gracefully without a usable API key
-(R14.2), so a deliberately invalid one is enough to reach the sidebar, and no
-assertion here depends on a model catalog or a price being fetched.
+These run offline *by construction*: the fixture refuses the socket, so the app
+takes its documented degraded path (R14.2) and no assertion depends on a model
+catalog or a price. An earlier version merely passed an unusable key and let a
+real request fail soft, which was slow, flaky, and not actually offline.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import pathlib
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from interview_prep import context
 from interview_prep.permissions import ROLE_ENV_VAR
 
 # Absolute, because the fixture runs each app from a scratch cwd. The app's own
@@ -61,6 +65,19 @@ def isolated_config(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", UNUSABLE_KEY)
     monkeypatch.delenv("GITHUB_PAT", raising=False)
     monkeypatch.delenv(ROLE_ENV_VAR, raising=False)
+
+    # These tests claimed to be offline and were not: the unusable key still
+    # sent a real catalog request, which merely happened to fail soft. That
+    # made them slow and flaky (a truncated response under coverage
+    # instrumentation is what surfaced the IncompleteRead bug in
+    # `fetch_openrouter_models`). Refuse the socket outright, so the app takes
+    # its documented degraded path (R14.2) deterministically and nothing here
+    # depends on the network.
+    def no_network(*args, **kwargs):
+        raise OSError("network disabled in tests")
+
+    monkeypatch.setattr("interview_prep.context.request.urlopen", no_network)
+    context.fetch_openrouter_models.clear()
     return monkeypatch
 
 
