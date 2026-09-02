@@ -264,6 +264,7 @@ flowchart TB
         llmC["agent + accounting<br/>agent.py · middleware.py · pricing.py · context.py"]
         toolsC["tools + policy<br/>tools.py · policy.py · web_research.py · github_mcp.py"]
         uiC["rendering<br/>ui.py"]
+        access["roles + permissions<br/>permissions.py"]
     end
 
     mdfiles["prompts/*.md — interviewer behavior lives here, not in Python<br/>(personas + guardrail classifier prompt)"]
@@ -292,6 +293,11 @@ flowchart TB
     class mdfiles mdfile
     class kbfiles mdfile
 ```
+
+`permissions.py` has **no outgoing edges** — no markdown, no OpenRouter, no
+framework. That is deliberate (ADR-0190): the page, the agent path and the
+tests all ask the same object, so it may depend on nothing they don't share.
+`chat_bot.py` holds its only adapter, `role_lookup`.
 
 The full module-by-module list (what each file exports) lives in
 [`CLAUDE.md`](../../CLAUDE.md) and the [`README`](../../README.md) — inventories read

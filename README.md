@@ -77,6 +77,12 @@ The `.env` file is gitignored and loaded automatically at startup. Alternatively
 
 Optionally, set `GITHUB_PAT` in the same `.env` to enable the GitHub portfolio deep-dive: create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens) with read-only access to public repositories. Without it, the app runs normally minus that feature.
 
+### Roles (developer view)
+
+Set `INTERVIEW_PREP_ROLE=dev` in `.env` — or in Streamlit secrets when deployed — to see the **Developer** and **Warnings** sidebar tabs. Any other value, including unset or misspelled, is treated as a regular user and shows neither. Warnings you can act on (a rejected upload, a retrieval fallback, an unverified reference) still appear in the chat itself for every role.
+
+> **This is configuration, not authentication.** The role is only settable server-side, never from the browser — but there is no login, so a deployed app is exactly as private as its URL. Per-user identity, per-user API keys, and per-user spend caps are planned separately (see `docs/REQUIREMENTS.md` § 20).
+
 ## Run
 
 ```bash

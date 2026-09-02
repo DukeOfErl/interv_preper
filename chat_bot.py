@@ -6,6 +6,7 @@ This module only wires together the pieces in the ``interview_prep`` package
 and drives the Streamlit chat loop.
 """
 
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -26,6 +27,7 @@ from interview_prep.config import (
     REASONING_EFFORTS,
     load_api_key,
     load_github_pat,
+    load_role,
 )
 from interview_prep.context import (
     compute_context_usage,
@@ -61,6 +63,7 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
+from interview_prep.permissions import Permission, current_role, has
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
@@ -84,6 +87,26 @@ from interview_prep.ui import (
     render_warnings_log,
     render_web_sources_panel,
 )
+
+
+def role_lookup(key):
+    """The identity port's one implementation (R20.7): server-side config only.
+
+    Streamlit secrets first (how a Cloud deployment sets it), then the
+    environment (how a local `.env` does). Deliberately *not* the query string
+    or session state — per R20.8 anything the browser can influence is not an
+    identity. `st.secrets` raises when no secrets file exists, which is the
+    normal local case, so absence is not an error.
+    """
+    try:
+        from_secrets = st.secrets.get(key)
+    except Exception:
+        from_secrets = None
+    # `load_role` loads the .env itself rather than relying on `load_api_key`
+    # having run earlier in `main` — otherwise the documented .env path breaks
+    # silently (and fails closed, so it reads as "my tabs vanished") the moment
+    # this call moves above the key block.
+    return from_secrets or load_role()
 
 
 def in_script_thread(callback):
@@ -293,13 +316,27 @@ def main() -> None:
     if st.session_state["prompt_source_key"] not in source_keys:
         st.session_state["prompt_source_key"] = default_source(sources).key
 
-    # Four sidebar tabs: everything the interviewee touches lives in Interview;
-    # the accumulated per-answer evaluation cards in Evaluations; diagnostics
+    # Sidebar tabs: everything the interviewee touches lives in Interview; the
+    # accumulated per-answer evaluation cards in Evaluations; diagnostics
     # (context, spend, prompt config, retrieval debug) in Developer; the
     # accumulated document-rejection log in Warnings.
-    interview_tab, evaluations_tab, dev_tab, warnings_tab = st.sidebar.tabs(
-        ["Interview", "Evaluations", "Developer", "Warnings"]
-    )
+    #
+    # The last two are offered only to a role holding VIEW_DIAGNOSTICS (R20.10).
+    # Not rendering them is presentation, not protection, and no operation
+    # behind them is separately guarded today — none currently needs to be,
+    # since they only display state. The one with a real side effect is the
+    # embedding-model selector (switching it re-embeds every document, at
+    # cost), which is protected only by not being drawn; when a capability
+    # here needs a real guard it belongs in the operation, per R20.5. The
+    # warnings a user can act on still flash in the chat body either way
+    # (R20.6).
+    show_diagnostics = has(current_role(role_lookup), Permission.VIEW_DIAGNOSTICS)
+    tab_labels = ["Interview", "Evaluations"]
+    if show_diagnostics:
+        tab_labels += ["Developer", "Warnings"]
+    sidebar_tabs = st.sidebar.tabs(tab_labels)
+    interview_tab, evaluations_tab = sidebar_tabs[0], sidebar_tabs[1]
+    dev_tab, warnings_tab = sidebar_tabs[2:4] if show_diagnostics else (None, None)
 
     model = st.session_state["openai_model"]
     # Reasoning effort is only meaningful for reasoning models, so the selector
@@ -366,17 +403,18 @@ def main() -> None:
     with evaluations_tab:
         render_evaluations_tab(st.session_state["evaluation_cards"])
 
-    with dev_tab:
-        render_embedding_selector(EMBEDDING_MODELS)
-        render_sidebar(library, usage, spend)
-        render_retrieval_panel(
-            st.session_state["last_retrieval"], st.session_state["last_query"]
-        )
-        render_tool_calls_panel(st.session_state["last_tool_calls"])
-        render_knowledgebase_panel(kb)
+    if show_diagnostics:
+        with dev_tab:
+            render_embedding_selector(EMBEDDING_MODELS)
+            render_sidebar(library, usage, spend)
+            render_retrieval_panel(
+                st.session_state["last_retrieval"], st.session_state["last_query"]
+            )
+            render_tool_calls_panel(st.session_state["last_tool_calls"])
+            render_knowledgebase_panel(kb)
 
-    with warnings_tab:
-        render_warnings_log(st.session_state["warnings_log"])
+        with warnings_tab:
+            render_warnings_log(st.session_state["warnings_log"])
 
     st.title("Interview preparation Chatbot")
 

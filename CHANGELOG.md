@@ -10,6 +10,16 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
+### Added
+- **Roles.** The sidebar's **Developer** and **Warnings** tabs are now shown
+  only to a `dev` role, set server-side via `INTERVIEW_PREP_ROLE` in the
+  environment or Streamlit secrets (see `.env.example`); everyone else sees
+  Interview and Evaluations. Warnings you can act on — a rejected upload, a
+  retrieval fallback, an unverified reference — still appear in the chat
+  itself for every role. This is configuration, not login: there is **no
+  authentication yet**, so a deployment is only as private as its URL
+  (ADR-0190).
+
 ### Changed
 - The interviewer's turn now runs on **LangChain's agent** rather than a
   hand-rolled tool loop (ADR-0170). Same tools, same budget, same safeguards —

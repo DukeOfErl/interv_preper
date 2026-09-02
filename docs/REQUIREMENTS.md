@@ -194,3 +194,34 @@ The application code is a thin shell around both.
 - **R19.11** **The tool-round budget must fit repository exploration.** A deep-dive needs several sequential rounds (find the repo, list directories, read files) and normally wastes one on a guessed path that does not exist. The cap must leave room for that; sized only for a single web search, turns ran out mid-exploration, which is what triggered the fabrication above.
 - **R19.12** **The user is told what makes a deep-dive work.** Repository exploration degrades markedly at low reasoning effort (guessed paths instead of listings; narrated tool calls instead of real ones), so after a turn that used the GitHub tools with effort below the maximum, the app shows a one-shot informational notice — not a warning — pointing at the effort control, and noting that a more capable model helps too. Shown once per session, and never for models that expose no reasoning control.
 - **R19.13** **A failed read must be admitted, not filled in.** Prompt rules require the interviewer to discuss only files and symbols it has actually received (a listing proves a file exists, not what is in it), and to say plainly that it could not read the code — asking which file to look at — rather than inventing names or implementations. This is the behavioral counterpart to R16.1's final-hop tool withholding, which otherwise pressures a model with no content into answering anyway.
+
+---
+
+## 20. User roles & permissions
+
+*(Design rationale: ADR-0190.)*
+
+**Why a permission model and not just hidden tabs:** the app is headed for a shared Streamlit Cloud deployment where an interviewee and a developer reach the same URL. Hiding the diagnostic tabs is presentation. What actually needs protecting is spend, and later whose API key pays for a turn — and `evals/` and `tests/` already call the agent without passing through `chat_bot.py` at all. A guard that lives in the page therefore protects exactly one of the app's three callers. So the model is built as a permission check any caller can ask, and the UI becomes one of its consumers rather than its enforcement point.
+
+### Roles & permissions
+
+- **R20.1** Every session resolves to exactly one **role**. Two exist: `user` (the interviewee; the default) and `dev`.
+- **R20.2** A **permission** is a named capability, never a UI element. One is defined initially: *view diagnostics*.
+- **R20.3** Resolution and checking are **fail closed**: an unknown role name, an absent identity, a malformed override, or any exception raised while resolving yields `user` — never `dev`. Least privilege is the error case, and the cheap direction to be wrong in: a wrongly denied permission produces a visible complaint, a wrongly granted one produces nothing at all.
+- **R20.4** The check is a **pure function of (role, permission)** living in its own module that imports neither Streamlit nor any agent framework — so it is callable from a unit test, from the agent path, and from the page alike. This is the separation `policy.py` already keeps (ADR-0150), for the same reason.
+- **R20.5** **A hidden tab is not a permission.** Gating presentation is expected, but any operation that must be restricted is guarded inside the function that performs it, not in the caller that renders it.
+- **R20.6** Withholding diagnostics must not withhold **actionable** information. The one-shot flash warnings in the chat body stay visible to every role — the document-rejection warning (R15.6), the retrieval-fallback notice (R15.7), and the unverified-reference flash (R19.8) — because they tell a user something about their own turn that they can act on. Only the durable Warnings *tab* is gated.
+- **R20.7** Role resolution sits behind a single **identity port** — one seam, one function — with one implementation initially: an override read from the environment or Streamlit secrets. With the role resolved to `dev`, the app behaves exactly as it does today.
+- **R20.8** The override must **not be influenceable from the browser**. A role taken from a URL query parameter, or from a `session_state` key any page code can write, is explicitly out of scope: anything in `session_state` is reachable by anything in the process.
+- **R20.9** The role is resolved **from the port on each run**, not cached across runs in a form that outlives a change to the underlying identity.
+
+### Amendments to current-state requirements
+
+- **R20.10** (amends **R11**) The Developer dashboard and the Warnings tab render only for a role holding *view diagnostics*. Without it, the sidebar offers the Interview and Evaluations tabs only.
+- **R20.11** (amends **R13**) The permission module carries unit tests covering every (role, permission) pair and every fail-closed input. A deliberate defect seeded into a copy must fail exactly those tests (per the `fault-seeding` discipline), because a wrongly granted permission raises no error, logs nothing, and produces output that looks ordinary.
+
+### Deferred (each its own work package and ADR)
+
+- **R20.12** *(deferred)* **Authentication.** Replacing the override with a real identity provider. Until it lands there is no authentication: the role is configuration, and the deployment is only as private as its URL. This must be stated wherever the deployment is documented.
+- **R20.13** *(deferred)* **Per-role API key.** A `dev` role may spend the app's own `OPENROUTER_API_KEY`; a `user` role supplies its own through the existing sidebar input. Amends R3.1–R3.3.
+- **R20.14** *(deferred)* **Per-identity spend cap**, enforced where spend is accrued rather than where it is displayed. It requires durable storage that survives a container restart, which runs against ADR-0110's stated principle that no database ever needs hosting — so it is its own decision, not a detail of this one.
