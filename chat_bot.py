@@ -27,6 +27,7 @@ from interview_prep.config import (
     REASONING_EFFORTS,
     load_api_key,
     load_github_pat,
+    load_role,
 )
 from interview_prep.context import (
     compute_context_usage,
@@ -62,12 +63,7 @@ from interview_prep.retrieval import (
     fill_retrieved_context,
     format_context_block,
 )
-from interview_prep.permissions import (
-    ROLE_ENV_VAR,
-    Permission,
-    current_role,
-    has,
-)
+from interview_prep.permissions import Permission, current_role, has
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
@@ -106,7 +102,11 @@ def role_lookup(key):
         from_secrets = st.secrets.get(key)
     except Exception:
         from_secrets = None
-    return from_secrets or os.getenv(key)
+    # `load_role` loads the .env itself rather than relying on `load_api_key`
+    # having run earlier in `main` — otherwise the documented .env path breaks
+    # silently (and fails closed, so it reads as "my tabs vanished") the moment
+    # this call moves above the key block.
+    return from_secrets or load_role()
 
 
 def in_script_thread(callback):
@@ -322,9 +322,14 @@ def main() -> None:
     # accumulated document-rejection log in Warnings.
     #
     # The last two are offered only to a role holding VIEW_DIAGNOSTICS (R20.10).
-    # Not rendering them is presentation, not protection — the operations they
-    # expose are guarded where they happen (R20.5), and the warnings a user can
-    # act on still flash in the chat body either way (R20.6).
+    # Not rendering them is presentation, not protection, and no operation
+    # behind them is separately guarded today — none currently needs to be,
+    # since they only display state. The one with a real side effect is the
+    # embedding-model selector (switching it re-embeds every document, at
+    # cost), which is protected only by not being drawn; when a capability
+    # here needs a real guard it belongs in the operation, per R20.5. The
+    # warnings a user can act on still flash in the chat body either way
+    # (R20.6).
     show_diagnostics = has(current_role(role_lookup), Permission.VIEW_DIAGNOSTICS)
     tab_labels = ["Interview", "Evaluations"]
     if show_diagnostics:

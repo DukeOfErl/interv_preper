@@ -86,8 +86,28 @@ def test_a_role_that_is_not_a_string_is_a_user():
 
 
 def test_a_role_whose_string_conversion_explodes_is_a_user():
-    # Fail closed on an exception, not just on an unrecognized value.
+    # Fail closed on an exception, not just on an unrecognized value. Note this
+    # case is caught by the isinstance guard and never reaches the handler —
+    # see the next test for the input that does.
     assert resolve_role(Exploding()) is Role.USER
+
+
+def test_a_string_that_raises_while_being_normalised_is_a_user():
+    """The exception handler in `resolve_role`, actually exercised.
+
+    Found in review: every other hostile input here is rejected by the
+    `isinstance(raw, str)` guard first, so deleting the whole `try/except`
+    left all 22 tests green — a false all-clear of exactly the kind R20.11
+    exists to prevent. A `str` subclass is the shape that passes the guard
+    and then fails inside it, which is reachable in practice from any
+    secrets or settings backend that returns a proxy string type.
+    """
+
+    class HostileString(str):
+        def strip(self, *args):
+            raise RuntimeError("normalisation exploded")
+
+    assert resolve_role(HostileString("dev")) is Role.USER
 
 
 # --- has: the permission check ----------------------------------------------

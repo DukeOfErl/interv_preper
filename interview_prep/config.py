@@ -266,3 +266,19 @@ def load_github_pat():
     """
     load_dotenv()
     return os.getenv("GITHUB_PAT")
+
+
+def load_role():
+    """Load a local ``.env`` (if present) and return the configured role name.
+
+    Returns ``None`` when unset, which `permissions.resolve_role` reads as the
+    least-privileged role. It exists so the documented ``.env`` path does not
+    depend on `load_api_key` having run first (see `chat_bot.role_lookup`).
+
+    The key name lives in `permissions` so there is one definition of it; that
+    module imports nothing, so depending on it here costs nothing.
+    """
+    from interview_prep.permissions import ROLE_ENV_VAR
+
+    load_dotenv()
+    return os.getenv(ROLE_ENV_VAR)
