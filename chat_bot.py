@@ -23,7 +23,6 @@ from interview_prep.config import (
     GUARDRAIL_DOC_MODEL,
     KNOWLEDGEBASE_DB_PATH,
     KNOWLEDGEBASE_DIR,
-    QUERY_REWRITE_HISTORY_TURNS,
     REASONING_EFFORTS,
     load_api_key,
     load_github_pat,
@@ -41,6 +40,7 @@ from interview_prep.github_mcp import (
     unquoted_code_blocks,
     unverified_references,
 )
+from interview_prep.grounding import ground_turn
 from interview_prep.guardrails import JailbreakGuard
 from interview_prep.ingest import (
     DocumentParseError,
@@ -58,11 +58,7 @@ from interview_prep.prompts import (
     discover_sources,
 )
 from interview_prep.query_rewrite import QueryCondenser
-from interview_prep.retrieval import (
-    DocumentIndex,
-    fill_retrieved_context,
-    format_context_block,
-)
+from interview_prep.retrieval import DocumentIndex
 from interview_prep.permissions import Permission, current_role, has
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
@@ -452,51 +448,33 @@ def main() -> None:
         # the {retrieved_context} slot. Only grounding-aware sources have the
         # slot; other sources get the system prompt untouched. Retrieval errors
         # degrade to an ungrounded turn rather than blocking the chat.
-        context_block = ""
-        if library.is_grounding_aware:
-            kb_ready = kb is not None and not kb.is_empty
-            if not doc_index.is_empty or kb_ready:
-                # On a follow-up, rewrite the message into a standalone query so
-                # vector search isn't handed an anaphoric fragment ("that role").
-                # The first turn has no referents to resolve — use it verbatim
-                # and skip the extra call. Condensing fails open to the prompt.
-                if messages:
-                    with st.spinner("Rephrasing your question for search…"):
-                        rewrite = QueryCondenser(api_key=api_key).condense(
-                            prompt, messages[-QUERY_REWRITE_HISTORY_TURNS:]
-                        )
-                    query = rewrite.query
-                    # Fail open, but tell the user we searched with the raw
-                    # message instead of a rewritten query.
-                    if rewrite.errored:
-                        record_warning("", "condense")
-                else:
-                    query = prompt
-                st.session_state["last_query"] = query
-                # Both retrievals fail open independently: answer with whatever
-                # context could be fetched, but say so.
-                retrieved = []
-                with st.spinner("Retrieving document excerpts…"):
-                    if not doc_index.is_empty:
-                        try:
-                            retrieved += doc_index.retrieve(query)
-                        except Exception as exc:
-                            record_warning("", "retrieval", str(exc))
-                    if kb_ready:
-                        try:
-                            retrieved += kb.retrieve(
-                                query, st.session_state["embedding_model"]
-                            )
-                        except Exception as exc:
-                            # Distinct kind: the "retrieval" copy talks about
-                            # uploaded documents, which may not even exist on
-                            # a KB-only grounded turn.
-                            record_warning("", "kb_retrieval", str(exc))
-                st.session_state["last_retrieval"] = retrieved
-                context_block = format_context_block(retrieved)
-            effective_prompt = fill_retrieved_context(system_prompt, context_block)
-        else:
-            effective_prompt = system_prompt
+        # Grounding policy — which query is searched, and what a failing source
+        # costs the turn — lives in `interview_prep.grounding` so it can be
+        # tested without a browser (tests/test_grounding.py). What stays here is
+        # presentation: the spinners, and writing the result to session state.
+        def condense_with_spinner(text, history):
+            with st.spinner("Rephrasing your question for search…"):
+                return QueryCondenser(api_key=api_key).condense(text, history)
+
+        with st.spinner("Retrieving document excerpts…"):
+            grounded = ground_turn(
+                prompt=prompt,
+                history=messages,
+                system_prompt=system_prompt,
+                is_grounding_aware=library.is_grounding_aware,
+                doc_index=doc_index,
+                kb=kb,
+                embedding_model=st.session_state["embedding_model"],
+                condense=condense_with_spinner,
+                warn=record_warning,
+            )
+        effective_prompt = grounded.effective_prompt
+        # A `None` query means nothing was searched, so the Developer tab keeps
+        # showing the last real retrieval rather than being blanked by a turn
+        # that never looked anything up.
+        if grounded.query is not None:
+            st.session_state["last_query"] = grounded.query
+            st.session_state["last_retrieval"] = grounded.retrieved
 
         guard = JailbreakGuard(api_key=api_key)
         llm = InterviewAgent(
@@ -717,7 +695,7 @@ def main() -> None:
             "role": "assistant",
             "content": assistant_reply,
             "reasoning_tokens": llm.last_reasoning_tokens or 0,
-            "context_tokens": estimate_text_tokens(context_block),
+            "context_tokens": estimate_text_tokens(grounded.context_block),
         }
         # The guardrail fails open on any classifier error; flag the turn so the
         # UI can note that this prompt went through unscreened.
