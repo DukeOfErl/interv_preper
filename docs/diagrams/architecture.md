@@ -259,7 +259,7 @@ flowchart TB
     subgraph pkg["interview_prep/ (one job per cluster)"]
         direction LR
         promptsC["prompt composition<br/>prompts.py · config.py"]
-        rag["document RAG + knowledge base<br/>ingest.py · retrieval.py · knowledgebase.py"]
+        rag["document RAG + knowledge base<br/>ingest.py · retrieval.py · knowledgebase.py<br/>grounding.py · query_rewrite.py"]
         safety["guardrail<br/>guardrails.py"]
         llmC["agent + accounting<br/>agent.py · middleware.py · pricing.py · context.py"]
         toolsC["tools + policy<br/>tools.py · policy.py · web_research.py · github_mcp.py"]

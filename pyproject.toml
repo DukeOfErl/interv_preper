@@ -159,7 +159,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=interview_prep --cov-report=term-missing"
+addopts = "--cov=interview_prep --cov=chat_bot --cov-report=term-missing"
 markers = [
     "integration: makes real network calls; skipped unless the key it needs (OPENROUTER_API_KEY or GITHUB_PAT) is set",
 ]
