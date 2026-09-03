@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from interview_prep.config import QUERY_REWRITE_HISTORY_TURNS
 from interview_prep.grounding import ground_turn
 from interview_prep.retrieval import RetrievedChunk
 
@@ -160,6 +161,34 @@ def test_a_follow_up_is_condensed_before_searching():
     assert index.queries == ["the Acme role"]
 
 
+def test_only_the_last_few_turns_are_handed_to_the_condenser():
+    """The window is the whole point of the slice, and nothing pinned it.
+
+    `chat_bot` passes the entire transcript, so `ground_turn` is the only place
+    that decides what the rewriter sees. Found by the pre-merge review: seeding
+    `history[:QUERY_REWRITE_HISTORY_TURNS]` — the slice reversed — left all 15
+    tests in this file green, because both condense doubles discarded their
+    second argument. On a long interview that mutation resolves "tell me more
+    about that" against the opening intake exchange, and the wrong excerpts come
+    back looking perfectly ordinary.
+    """
+    seen = []
+
+    def condense(prompt, history):
+        seen.append(history)
+        return Rewrite("standalone")
+
+    history = [
+        {"role": "user", "content": f"turn {n}"} for n in range(6)
+    ]
+    run(history=history, index=FakeIndex(), condense=condense)
+
+    assert len(seen) == 1
+    # The *most recent* QUERY_REWRITE_HISTORY_TURNS messages, in order.
+    assert seen[0] == history[-QUERY_REWRITE_HISTORY_TURNS:]
+    assert [m["content"] for m in seen[0]] == ["turn 2", "turn 3", "turn 4", "turn 5"]
+
+
 def test_a_failed_condensation_still_searches_and_says_so():
     # Fails open: the raw prompt is searched rather than the turn being lost,
     # but the user is told the search used their words verbatim.
@@ -256,6 +285,26 @@ def test_query_is_none_exactly_when_no_retrieval_was_attempted():
 
     searched, _ = run(index=FakeIndex(chunks=[chunk("doc")]))
     assert searched.query == "tell me about that role"
+
+
+def test_a_broken_context_block_is_allowed_to_crash_the_turn():
+    """The one failure this module must NOT absorb (R15.8).
+
+    `ground_turn` fails open on both retrieval sources, and the six-line comment
+    above the `format_context_block` call says that call is deliberately *not*
+    guarded: formatting reads fields off chunks the sources just produced, so a
+    failure there is a broken context-block contract, not a flaky dependency.
+    Swallowing it would substitute an empty block and ship a confidently
+    ungrounded reply while the Developer tab still lists the retrieved chunks.
+
+    That policy was defended by nothing — wrapping the call in
+    `except Exception` left the whole suite green — and the pressure to wrap it
+    is documented, not hypothetical: see `chunk()` above, where test doubles
+    that did not match `RetrievedChunk` pushed an implementer into exactly that
+    guard once already.
+    """
+    with pytest.raises(AttributeError):
+        run(index=FakeIndex(chunks=[object()]))
 
 
 def test_the_rendered_block_is_returned_for_token_accounting():

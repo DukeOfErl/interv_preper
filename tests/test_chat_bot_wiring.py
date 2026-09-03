@@ -20,6 +20,8 @@ from __future__ import annotations
 import pathlib
 
 import pytest
+import streamlit as st
+from streamlit import config as st_config
 from streamlit.testing.v1 import AppTest
 
 from interview_prep import context
@@ -32,6 +34,18 @@ APP = pathlib.Path(__file__).resolve().parent.parent / "chat_bot.py"
 DIAGNOSTIC_TABS = {"Developer", "Warnings"}
 # Enough to get past the fail-fast key check; never used against the API.
 UNUSABLE_KEY = "sk-not-a-real-key-for-tests"
+
+
+def use_secrets_file(path):
+    """Point Streamlit at `path` as the *only* secrets file.
+
+    `secrets.files` has no environment route, so it has to be set through the
+    config API. `st.secrets` then has to be reset, because it memoises the
+    parsed file process-globally — that cache is what defeated every earlier
+    attempt to canary this.
+    """
+    st_config.set_option("secrets.files", [str(path)], where_defined="test")
+    st.secrets._reset()
 
 
 @pytest.fixture
@@ -49,17 +63,29 @@ def isolated_config(monkeypatch, tmp_path):
     `./.streamlit/secrets.toml` both resolve relative to cwd, so neither the
     repo's nor the developer's is visible here.
 
-    What it does not: a `~/.streamlit/secrets.toml` would still be found.
-    `STREAMLIT_SECRETS_FILES` is set below to redirect that, but this is
-    **unverified** — `st.secrets` caches process-globally, which contaminated
-    every attempt to canary it, and $HOME is not writable in this sandbox. If
-    that file exists and names a role, `test_no_other_role_is` is what will
-    fail, with a tab-label diff. Treat such a failure as this fixture leaking,
-    not as a regression in the gate.
+    What it does **not** fix is `~/.streamlit/secrets.toml`, and the earlier
+    attempt to redirect it — setting `STREAMLIT_SECRETS_FILES` — was inert.
+    Measured on streamlit 1.58.0: with that variable set,
+    `config.get_option("secrets.files")` still returns the two default paths
+    with `where_defined == "<default>"`. That option simply has no environment
+    route. The failure was silent in both directions: on a machine whose home
+    secrets file named `dev`, 8 of these 9 tests failed against a correct gate;
+    on one naming `user`, every `test_no_other_role_is` case passed *regardless
+    of what the gate did* — masking the exact fail-open regression this file
+    exists to catch.
+
+    The option is now set directly and the secrets singleton reset, which is
+    verified rather than assumed: pointing `secrets.files` at a file containing
+    `INTERVIEW_PREP_ROLE = "dev"` makes `st.secrets.get(...)` return `"dev"`,
+    and re-pointing it at an empty file returns `None`. So the redirect is known
+    to be live in both directions, and `test_the_role_can_come_from_secrets`
+    below keeps it that way — if it ever goes inert again, that test fails
+    instead of these silently reading the developer's machine.
     """
+    original_secrets_files = st_config.get_option("secrets.files")
     secrets = tmp_path / "secrets.toml"
     secrets.write_text("")
-    monkeypatch.setenv("STREAMLIT_SECRETS_FILES", str(secrets))
+    use_secrets_file(secrets)
     (tmp_path / ".env").write_text("")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENROUTER_API_KEY", UNUSABLE_KEY)
@@ -78,7 +104,15 @@ def isolated_config(monkeypatch, tmp_path):
 
     monkeypatch.setattr("interview_prep.context.request.urlopen", no_network)
     context.fetch_openrouter_models.clear()
-    return monkeypatch
+
+    yield monkeypatch
+
+    # `set_option` is process-global and `monkeypatch` cannot undo it, so the
+    # redirect has to be lifted by hand or it leaks into every later test.
+    st_config.set_option(
+        "secrets.files", original_secrets_files, where_defined="test"
+    )
+    st.secrets._reset()
 
 
 def run_app(monkeypatch, role, session_state=None, query_params=None):
@@ -102,6 +136,39 @@ def tab_labels(app):
 
 def test_a_dev_role_is_offered_the_diagnostic_tabs(isolated_config):
     labels = tab_labels(run_app(isolated_config, "dev"))
+    assert DIAGNOSTIC_TABS <= set(labels), labels
+
+
+def test_the_role_can_come_from_secrets(isolated_config, tmp_path):
+    """R20.7's first source — how a Streamlit Cloud deployment sets the role.
+
+    `role_lookup` reads `st.secrets` before the environment, and until now only
+    the environment branch was ever exercised. This also keeps the fixture's
+    redirect honest: it is the one test that *needs* `secrets.files` to point
+    at the scratch file, so if that mechanism goes inert again (as
+    `STREAMLIT_SECRETS_FILES` silently was) this fails loudly, instead of the
+    other tests quietly reading the developer's `~/.streamlit/secrets.toml`.
+    """
+    secrets = tmp_path / "from_secrets.toml"
+    secrets.write_text(f'{ROLE_ENV_VAR} = "dev"\n')
+    use_secrets_file(secrets)
+
+    # No environment role at all: the tabs can only come from the secrets file.
+    labels = tab_labels(run_app(isolated_config, None))
+    assert DIAGNOSTIC_TABS <= set(labels), labels
+
+
+def test_secrets_outrank_the_environment(isolated_config, tmp_path):
+    """R20.7 states the order; nothing asserted it.
+
+    A deployment that sets `dev` in secrets must not be demoted by a stray
+    `INTERVIEW_PREP_ROLE=user` in the process environment.
+    """
+    secrets = tmp_path / "outranks.toml"
+    secrets.write_text(f'{ROLE_ENV_VAR} = "dev"\n')
+    use_secrets_file(secrets)
+
+    labels = tab_labels(run_app(isolated_config, "user"))
     assert DIAGNOSTIC_TABS <= set(labels), labels
 
 
