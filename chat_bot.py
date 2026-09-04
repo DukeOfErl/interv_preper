@@ -476,6 +476,26 @@ def main() -> None:
     # here needs a real guard it belongs in the operation, per R20.5. The
     # warnings a user can act on still flash in the chat body either way
     # (R20.6).
+    # Who you are, before what you can do — account chrome sits at the top of
+    # the sidebar, above the tabs, so it is the first thing visible and stays
+    # visible whichever tab is open. Not in the main window: that is the
+    # interview, and this would cost it vertical space permanently.
+    #
+    # One row, not three stacked elements. Stacked (caption, button, divider)
+    # it pushed the tabs far enough down that the sidebar needed scrolling
+    # before showing anything the person came for — chrome earning more space
+    # than the content. The divider is gone for the same reason: its margins
+    # cost more than the separation was worth.
+    #
+    # Sign-out belongs to being signed in, not to holding a permission
+    # (R21.21): every authorized identity gets it, dev and user alike. The
+    # address stays visible rather than hidden behind the button, because a
+    # sign-out control with no account name is a coin flip once more than one
+    # account is in play.
+    account, action = st.sidebar.columns([2, 1], vertical_alignment="center")
+    account.caption(f"{identity.email}")
+    action.button("Sign out", on_click=st.logout, use_container_width=True)
+
     show_diagnostics = has(identity.role, Permission.VIEW_DIAGNOSTICS)
     tab_labels = ["Interview", "Evaluations"]
     if show_diagnostics:
@@ -483,14 +503,6 @@ def main() -> None:
     sidebar_tabs = st.sidebar.tabs(tab_labels)
     interview_tab, evaluations_tab = sidebar_tabs[0], sidebar_tabs[1]
     dev_tab, warnings_tab = sidebar_tabs[2:4] if show_diagnostics else (None, None)
-
-    # Sign-out belongs to being signed in, not to holding a permission (R21.21):
-    # every authorized identity gets it, dev and user alike. Placed outside the
-    # tabs so it stays visible whichever one is open, and the email is shown
-    # alongside it so a person on a shared machine can see which account they
-    # are about to leave.
-    st.sidebar.caption(f"Signed in as {identity.email}")
-    st.sidebar.button("Sign out", on_click=st.logout)
 
     model = st.session_state["openai_model"]
     # Reasoning effort is only meaningful for reasoning models, so the selector
