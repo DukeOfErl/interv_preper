@@ -20,7 +20,6 @@ uses throughout.
 from __future__ import annotations
 
 import pathlib
-import time
 
 import pytest
 import streamlit as st
@@ -350,3 +349,54 @@ def test_an_unverified_allowlisted_address_is_refused_by_the_page(
     )
     assert tab_labels(app) == [], tab_labels(app)
     assert app.chat_input == []
+
+
+# --- R21.21: a working session can be ended from the app --------------------
+
+
+def sidebar_buttons(app):
+    return [b.label for b in app.sidebar.button]
+
+
+def test_a_signed_in_user_is_offered_sign_out(isolated_config, tmp_path):
+    """Without this, leaving means clearing a cookie by hand.
+
+    Streamlit's session is a 30-day cookie that outlives the browser tab
+    (R21.6), so "I closed it" is not signing out. On a shared machine that is
+    an exposure, not an inconvenience — the next person gets the interview,
+    the uploaded resume, and the operator's API budget.
+    """
+    write_roles(tmp_path, {"candidate@example.com": "user"})
+    app = run_app(isolated_config, logged_in("candidate@example.com"))
+    assert "Sign out" in sidebar_buttons(app), sidebar_buttons(app)
+
+
+def test_a_dev_is_offered_sign_out_too(isolated_config, tmp_path):
+    # Not a diagnostic: it belongs to being signed in, not to holding a
+    # permission, so it must not sit behind VIEW_DIAGNOSTICS.
+    write_roles(tmp_path, {"dev@example.com": "dev"})
+    app = run_app(isolated_config, logged_in("dev@example.com"))
+    assert "Sign out" in sidebar_buttons(app), sidebar_buttons(app)
+
+
+def test_the_sign_out_button_calls_streamlit_logout(isolated_config, tmp_path):
+    """Asserts the wiring, not just the widget.
+
+    A button that renders and does nothing looks identical in a screenshot and
+    identical in a label assertion, and is the more likely mistake here.
+    """
+    write_roles(tmp_path, {"candidate@example.com": "user"})
+    called = []
+    isolated_config.setattr(st, "logout", lambda: called.append(True))
+
+    app = run_app(isolated_config, logged_in("candidate@example.com"))
+    [button] = [b for b in app.sidebar.button if b.label == "Sign out"]
+    button.click().run()
+    assert called, "the Sign out button rendered but never called st.logout"
+
+
+def test_an_anonymous_visitor_is_not_offered_sign_out(isolated_config):
+    # Nothing to sign out of; offering it would imply a session that is not
+    # there. The sign-in page is its own screen.
+    app = run_app(isolated_config, ANONYMOUS_USER)
+    assert "Sign out" not in sidebar_buttons(app), sidebar_buttons(app)

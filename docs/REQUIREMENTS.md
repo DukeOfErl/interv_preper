@@ -241,6 +241,10 @@ The application code is a thin shell around both.
 - **R21.5** **Revocation is the allowlist's job, and is immediate.** The role table is re-read from secrets on *every* run (R20.9), so removing an address locks that person out on their next interaction whatever cookie their browser holds. This is what the expiry check was reaching for, and it is both stronger and operator-controlled.
 - **R21.6** Accepted, documented trade-off of the above: a stolen browser session authenticates for up to 30 days without contacting the provider again. Bounding that requires an **absolute session age** measured from `iat` — a deliberate policy, not a side effect of a token lifetime — and is deferred (R21.18).
 
+- **R21.21** An authenticated session can be **ended from the app**. A sign-out control is available wherever the person actually is: on the not-authorized page (so someone refused can switch accounts) and in the sidebar of a working session. Without the latter, leaving requires clearing a cookie by hand, because Streamlit's session outlives the browser tab (R21.6) — and on a shared machine "I can't log out" is a real exposure, not an inconvenience.
+
+*(Numbered out of sequence deliberately: renumbering § 21 again would churn every reference in the code and tests for no gain.)*
+
 ### Authorization
 
 - **R21.7** A single table in secrets maps **authorized email → role**. Presence in the table is authorization; **absence is refusal**. There is one source of truth, so an allowlist and a role table cannot disagree.

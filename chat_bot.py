@@ -484,6 +484,14 @@ def main() -> None:
     interview_tab, evaluations_tab = sidebar_tabs[0], sidebar_tabs[1]
     dev_tab, warnings_tab = sidebar_tabs[2:4] if show_diagnostics else (None, None)
 
+    # Sign-out belongs to being signed in, not to holding a permission (R21.21):
+    # every authorized identity gets it, dev and user alike. Placed outside the
+    # tabs so it stays visible whichever one is open, and the email is shown
+    # alongside it so a person on a shared machine can see which account they
+    # are about to leave.
+    st.sidebar.caption(f"Signed in as {identity.email}")
+    st.sidebar.button("Sign out", on_click=st.logout)
+
     model = st.session_state["openai_model"]
     # Reasoning effort is only meaningful for reasoning models, so the selector
     # is shown (and the param sent) only when the active model supports it.
