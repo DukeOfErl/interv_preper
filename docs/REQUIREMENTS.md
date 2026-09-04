@@ -225,3 +225,41 @@ The application code is a thin shell around both.
 - **R20.12** *(deferred)* **Authentication.** Replacing the override with a real identity provider. Until it lands there is no authentication: the role is configuration, and the deployment is only as private as its URL. This must be stated wherever the deployment is documented.
 - **R20.13** *(deferred)* **Per-role API key.** A `dev` role may spend the app's own `OPENROUTER_API_KEY`; a `user` role supplies its own through the existing sidebar input. Amends R3.1–R3.3.
 - **R20.14** *(deferred)* **Per-identity spend cap**, enforced where spend is accrued rather than where it is displayed. It requires durable storage that survives a container restart, which runs against ADR-0110's stated principle that no database ever needs hosting — so it is its own decision, not a detail of this one.
+
+## 21. Authentication & authorization
+
+*(Implements R20.12. Design rationale: ADR-0200.)*
+
+**Why authentication and an allowlist are two separate things.** OIDC answers *who is this*; it does not answer *may they be here*. Signing in with Google proves an email address and nothing else, and every Google account holder in the world can do it. Since every turn of this app spends the operator's own OpenRouter credit, a successful login is not sufficient grounds to serve anyone — so identity and authorization are decided separately, and the second is an explicit allowlist rather than a property of the first.
+
+### Identity
+
+- **R21.1** Authentication uses Streamlit's native OIDC support (`st.login` / `st.user` / `st.logout`), configured through `[auth]` in `secrets.toml`. No credential is ever handled by this app's code.
+- **R21.2** **Login is required.** An unauthenticated visitor is offered a sign-in control and nothing else: no chat input, no document upload, no model selector, and no turn may be taken.
+- **R21.3** The authenticated identity is the verified **email claim** of the OIDC token. An authenticated session with no email claim is treated as unauthenticated (fail closed), because the allowlist is keyed on email and an identity the allowlist cannot be applied to is not an identity this app can act on.
+- **R21.4** Identity tokens carry issuance and expiry times which Streamlit **does not** check. The app checks expiry itself on each run and logs an expired session out, so a revoked or aged token does not outlive its validity. This is R20.9 (resolve on each run) applied to a credential that can go stale on its own.
+
+### Authorization
+
+- **R21.5** A single table in secrets maps **authorized email → role**. Presence in the table is authorization; **absence is refusal**. There is one source of truth, so an allowlist and a role table cannot disagree.
+- **R21.6** Email comparison is case-insensitive and whitespace-stripped on both sides. Address casing is not a security boundary and treating it as one only produces mystifying refusals.
+- **R21.7** An authorized email whose role name is unrecognized resolves to `user` (per R20.3) and **remains authorized**. The two failures are graded differently on purpose: a typo in a role name should cost privilege, not access, because losing access to a paid-for account is the expensive direction for a legitimate user.
+- **R21.8** A table that is **absent, unreadable, or not a mapping authorizes nobody.** This is the one place the fail-closed default is expensive rather than cheap — a misconfigured deployment serves no one — and that is deliberate: the alternative is a deployment that silently admits the world to the operator's credit.
+- **R21.9** A user who is authenticated but not authorized is told plainly that their account is not authorized, is shown the address they signed in as (so they can report it or switch accounts), and is offered sign-out. No detail of the app is rendered to them, and **no turn may be taken**.
+
+### Where the refusal lives
+
+- **R21.10** The refusal is enforced **inside the operation that spends**, not only in the page that renders it (R20.5). `chat_bot.py` refuses early so the message is clean, but an unauthorized identity reaching the agent directly is refused there too — `evals/` and `tests/` call the agent without passing through the page, and a page-only guard would protect one of three callers.
+- **R21.11** The agent therefore requires an authorized identity to be handed to it, and raises rather than calling any model without one. A caller added later cannot spend by accident; making it spend requires passing something that says, in as many words, that it is authorized.
+- **R21.12** Authorization is **not** a `Permission`. Permissions grade what an authorized role may do; authorization decides whether there is a role at all. Modelling refusal as a missing permission would make "no identity" and "identity with few rights" the same state, and they fail in opposite directions.
+
+### Consequences for what already exists
+
+- **R21.13** (amends **R20.7**) The identity port's implementation becomes the authenticated session rather than an environment variable. The port itself — one seam, one function — does not change shape, which is the point of having had one.
+- **R21.14** (amends **R20.1**) A session no longer always resolves to a role: it resolves to a role **or to a refusal**. `user` remains the default *among authorized roles*, not the default for an unidentified visitor.
+- **R21.15** (amends **R20.12**) The statement that "there is no authentication and the deployment is only as private as its URL" is withdrawn from the documentation when this lands, and replaced by a statement of what is now true: access requires a Google sign-in **and** an entry in the operator's allowlist.
+- **R21.16** Local development and the test suite must not require a live OIDC provider. The identity port is injectable, so a test supplies an identity directly and never performs a login.
+
+### Deferred
+
+- **R21.17** *(deferred)* Per-identity audit of spend, which becomes possible once every turn has a stable email attached to it. It is the natural foundation for R20.14's spend cap and should be decided with it, not before.

@@ -8,6 +8,7 @@ and drives the Streamlit chat loop.
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -26,7 +27,6 @@ from interview_prep.config import (
     REASONING_EFFORTS,
     load_api_key,
     load_github_pat,
-    load_role,
 )
 from interview_prep.context import (
     compute_context_usage,
@@ -59,7 +59,8 @@ from interview_prep.prompts import (
 )
 from interview_prep.query_rewrite import QueryCondenser
 from interview_prep.retrieval import DocumentIndex
-from interview_prep.permissions import Permission, current_role, has
+from interview_prep.authorization import ANONYMOUS, authorize
+from interview_prep.permissions import Permission, has
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
@@ -85,24 +86,120 @@ from interview_prep.ui import (
 )
 
 
-def role_lookup(key):
-    """The identity port's one implementation (R20.7): server-side config only.
+ROLE_TABLE_KEY = "roles"
 
-    Streamlit secrets first (how a Cloud deployment sets it), then the
-    environment (how a local `.env` does). Deliberately *not* the query string
-    or session state — per R20.8 anything the browser can influence is not an
-    identity. `st.secrets` raises when no secrets file exists, which is the
-    normal local case, so absence is not an error.
+
+def role_table():
+    """The operator's allowlist: authorized email -> role name (R21.5).
+
+    Read from Streamlit secrets, which is where a Cloud deployment sets it and
+    where a local `.streamlit/secrets.toml` sets it too. Absence is not an
+    error here — it is a refusal, decided by `authorize` rather than by this
+    reader, so that "no table" and "table that authorizes nobody" take exactly
+    the same path (R21.8).
     """
     try:
-        from_secrets = st.secrets.get(key)
+        return st.secrets[ROLE_TABLE_KEY]
     except Exception:
-        from_secrets = None
-    # `load_role` loads the .env itself rather than relying on `load_api_key`
-    # having run earlier in `main` — otherwise the documented .env path breaks
-    # silently (and fails closed, so it reads as "my tabs vanished") the moment
-    # this call moves above the key block.
-    return from_secrets or load_role()
+        return None
+
+
+def user_claim(user, name):
+    """One claim off `st.user`, whichever access shape it presents."""
+    try:
+        if hasattr(user, "get"):
+            return user.get(name)
+        return getattr(user, name, None)
+    except Exception:
+        return None
+
+
+def signed_in(user):
+    """Whether there is a live authenticated session (R21.2, R21.4).
+
+    Separate from *authorized* on purpose, and the gate needs both: a visitor
+    who is not signed in must be sent to `st.login()`, while one who is signed
+    in but refused must not be — `st.login()` redirects unconditionally, so
+    sending an already-authenticated user there is an infinite redirect loop
+    rather than a message. Found by the WP2 red-team.
+    """
+    return bool(getattr(user, "is_logged_in", False)) and not token_has_expired(user)
+
+
+def token_has_expired(user):
+    """Whether the identity token's `exp` claim is in the past (R21.4).
+
+    Streamlit parses the token but explicitly does **not** check issuance or
+    expiry, so without this a session outlives the credential that justified
+    it — R20.9's "resolve on each run" applied to something that can go stale
+    on its own. Unreadable or absent `exp` is treated as *not* expired: the
+    allowlist is what authorizes, and refusing to serve an authorized user
+    because a claim was missing punishes the wrong person.
+    """
+    try:
+        exp = user_claim(user, "exp")
+        return exp is not None and float(exp) < time.time()
+    except Exception:
+        return False
+
+
+def current_identity():
+    """The identity port's adapter (R21.13) — one seam, now a real one.
+
+    Reads the authenticated session rather than an environment variable. The
+    port's shape is unchanged, which is the whole point of having had one:
+    everything downstream still asks a pure function a question.
+
+    Deliberately *not* consulted: the query string and `session_state`. R20.8
+    still holds — anything the browser can influence is not an identity, and
+    that is more true now that the answer decides who spends the operator's
+    money.
+    """
+    user = getattr(st, "user", None)
+    if not signed_in(user):
+        return ANONYMOUS
+    # `email_verified` is required, not decorative (R21.3). Without it the
+    # allowlist checks an address the signer never confirmed, and on any IdP
+    # that lets a user self-assert one at registration a stranger can be
+    # issued a validly signed token *as* an allowlisted person. Normalising the
+    # provider's spelling of the claim is this adapter's job; `authorize`
+    # demands the decided boolean and will not guess.
+    return authorize(
+        user_claim(user, "email"),
+        table=role_table(),
+        email_verified=user_claim(user, "email_verified") is True,
+    )
+
+
+def render_sign_in() -> None:
+    """The whole app, for a visitor who has not signed in (R21.2)."""
+    st.title("Interview Prep")
+    st.write(
+        "This app runs mock job interviews. Sign in to continue — access is "
+        "limited to accounts the operator has authorized."
+    )
+    try:
+        st.login()
+    except Exception as exc:
+        # A missing `[auth]` block or an absent Authlib is a deployment fault,
+        # not a user error, and saying so beats an unexplained traceback.
+        st.error(
+            "Sign-in is not configured on this deployment, so it cannot be "
+            f"used yet. ({exc})"
+        )
+
+
+def render_not_authorized(identity) -> None:
+    """R21.9: refused, told why, told which account, offered a way out."""
+    st.title("Not authorized")
+    st.write(
+        "You are signed in, but this account is not on the authorized list "
+        "for this app. If you believe it should be, ask the operator to add "
+        "the address below."
+    )
+    st.code(identity.email or "(no email address on this account)")
+    st.write("Signed in with the wrong account? Sign out and try another.")
+    st.button("Sign out", on_click=st.logout)
 
 
 def in_script_thread(callback):
@@ -269,6 +366,24 @@ def sync_knowledgebase(api_key):
 
 
 def main() -> None:
+    # Authentication and authorization first, before a key is even read
+    # (R21.2, R21.9). Every turn spends the operator's own credit, so an
+    # unauthorized visitor must not reach a model selector, an uploader, or a
+    # chat box — and `st.stop()` here means they reach none of them. The agent
+    # refuses independently (R21.10); this exists so the refusal is legible,
+    # not so it is enforced.
+    identity = current_identity()
+    if not signed_in(getattr(st, "user", None)):
+        render_sign_in()
+        st.stop()
+    if not identity.is_authorized:
+        # Signed in and refused — including a session with no email claim at
+        # all, which `render_not_authorized` says so. Deliberately not the
+        # sign-in page: that redirects, and redirecting an authenticated
+        # visitor loops forever.
+        render_not_authorized(identity)
+        st.stop()
+
     # Prefer a key from the environment/.env; otherwise let the user paste one
     # into the sidebar (kept in session only). Fail fast until we have a key.
     env_key = load_api_key()
@@ -326,7 +441,7 @@ def main() -> None:
     # here needs a real guard it belongs in the operation, per R20.5. The
     # warnings a user can act on still flash in the chat body either way
     # (R20.6).
-    show_diagnostics = has(current_role(role_lookup), Permission.VIEW_DIAGNOSTICS)
+    show_diagnostics = has(identity.role, Permission.VIEW_DIAGNOSTICS)
     tab_labels = ["Interview", "Evaluations"]
     if show_diagnostics:
         tab_labels += ["Developer", "Warnings"]
@@ -478,7 +593,10 @@ def main() -> None:
 
         guard = JailbreakGuard(api_key=api_key)
         llm = InterviewAgent(
-            api_key=api_key, model=model, reasoning_effort=reasoning_effort
+            api_key=api_key,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            identity=identity,
         )
         pending = messages + [{"role": "user", "content": prompt}]
         reply_parts = []

@@ -15,6 +15,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from interview_prep.agent import InterviewAgent
+from interview_prep.authorization import authorize
 from interview_prep.github_mcp import MCPResult
 from interview_prep.guardrails import GuardrailResult
 from interview_prep.middleware import TOOL_CALL_BUDGET
@@ -24,6 +25,16 @@ from interview_prep.web_research import Citation, ResearchResult
 
 CLEAN = GuardrailResult(allowed=True)
 FLAGGED = GuardrailResult(allowed=False, reason="embedded AI-directed instruction")
+
+
+TEST_IDENTITY = authorize(
+    "tests@example.com",
+    table={"tests@example.com": "dev"},
+    # Verification is required, not assumed (R21.3). Spelled out here rather
+    # than defaulted, because `tests/` is a real caller of the guard and the
+    # point of the guard is that a caller must say so.
+    email_verified=True,
+)
 
 
 class ScriptedModel(BaseChatModel):
@@ -136,7 +147,14 @@ def harness(*replies, guard=None, mcp=None, researcher=None, cache=None, on_warn
         mcp=mcp,
     )
     model = ScriptedModel(replies=list(replies))
-    agent = InterviewAgent(api_key="k", model="m", chat_model=model)
+    # Authorization is declared explicitly, never defaulted (R21.11). These
+    # tests are the app's second caller and reach the agent without touching
+    # the page, so they are exactly what the guard exists to catch: adding it
+    # turned all 21 of them red until this line said, in as many words, that
+    # the turn is authorized.
+    agent = InterviewAgent(
+        api_key="k", model="m", chat_model=model, identity=TEST_IDENTITY
+    )
     run = lambda prompt="go": "".join(  # noqa: E731
         agent.stream_reply(
             "sys",
