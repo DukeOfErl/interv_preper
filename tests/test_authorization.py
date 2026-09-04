@@ -3,10 +3,10 @@
 Separate from `test_permissions.py` on purpose, because the two answer
 different questions and fail in opposite directions. Permissions grade what an
 authorized role may *do*; authorization decides whether there is a role at all
-(R21.12). Collapsing them would make "nobody signed in" and "signed in with
+(R21.14). Collapsing them would make "nobody signed in" and "signed in with
 few rights" the same state.
 
-The asymmetry in R21.7/R21.8 is the substance of this file and is asserted from
+The asymmetry in R21.9/R21.10 is the substance of this file and is asserted from
 both sides, because a rule that classifies moves records in both directions and
 only the intended one gets looked at:
 
@@ -69,7 +69,7 @@ def test_an_allowlisted_candidate_is_authorized_as_user():
     assert not has(identity.role, Permission.VIEW_DIAGNOSTICS)
 
 
-# --- absence is refusal (R21.5) ---------------------------------------------
+# --- absence is refusal (R21.7) ---------------------------------------------
 
 
 def test_an_email_absent_from_the_table_is_refused():
@@ -78,7 +78,7 @@ def test_an_email_absent_from_the_table_is_refused():
     identity = authorize("stranger@example.com", table=TABLE)
     assert not identity.is_authorized
     assert identity.role is None
-    # The address is still carried, so the page can show it (R21.9) and the
+    # The address is still carried, so the page can show it (R21.11) and the
     # person can tell they signed in with the wrong account.
     assert identity.email == "stranger@example.com"
 
@@ -109,7 +109,7 @@ def test_no_usable_email_is_refused(email):
     assert identity.email is None
 
 
-# --- R21.6: casing and whitespace are not a security boundary ---------------
+# --- R21.8: casing and whitespace are not a security boundary ---------------
 
 
 @pytest.mark.parametrize(
@@ -135,7 +135,7 @@ def test_the_tables_own_keys_are_normalised_too():
     assert identity.role is Role.DEV
 
 
-# --- R21.7: a bad role costs privilege, not access --------------------------
+# --- R21.9: a bad role costs privilege, not access --------------------------
 
 
 @pytest.mark.parametrize(
@@ -157,7 +157,7 @@ def test_an_unrecognised_role_keeps_access_and_loses_privilege(role_value):
     assert identity.role is Role.USER, "a typo'd role must not grant privilege"
 
 
-# --- R21.8: an unusable table authorizes nobody -----------------------------
+# --- R21.10: an unusable table authorizes nobody -----------------------------
 
 
 @pytest.mark.parametrize(
@@ -195,14 +195,14 @@ def test_the_anonymous_identity_is_refused_and_holds_nothing():
 
 
 def test_an_identity_is_immutable():
-    """It is passed into the agent as the proof of authorization (R21.11), so
+    """It is passed into the agent as the proof of authorization (R21.13), so
     a caller must not be able to promote one after it was decided."""
     identity = authorize("candidate@example.com", table=TABLE, email_verified=True)
     with pytest.raises(Exception):
         identity.role = Role.DEV
 
 
-# --- R21.12: authorization is not a permission ------------------------------
+# --- R21.14: authorization is not a permission ------------------------------
 
 
 def test_an_unauthorized_identity_holds_no_permission():
@@ -283,7 +283,7 @@ def test_verification_is_required_by_default():
 
 
 def test_an_unverified_address_is_still_reported_back():
-    # So `render_not_authorized` can name it (R21.9) and the operator can see
+    # So `render_not_authorized` can name it (R21.11) and the operator can see
     # that someone tried to sign in as an allowlisted address.
     identity = authorize("operator@example.com", table=TABLE, email_verified=False)
     assert identity.email == "operator@example.com"

@@ -89,13 +89,13 @@ ROLE_TABLE_KEY = "roles"
 
 
 def role_table():
-    """The operator's allowlist: authorized email -> role name (R21.5).
+    """The operator's allowlist: authorized email -> role name (R21.7).
 
     Read from Streamlit secrets, which is where a Cloud deployment sets it and
     where a local `.streamlit/secrets.toml` sets it too. Absence is not an
     error here — it is a refusal, decided by `authorize` rather than by this
     reader, so that "no table" and "table that authorizes nobody" take exactly
-    the same path (R21.8).
+    the same path (R21.10).
     """
     try:
         return st.secrets[ROLE_TABLE_KEY]
@@ -137,7 +137,7 @@ def signed_in(user):
 
     What that check was reaching for is revocation, and `role_table()` already
     provides it, immediately and better: the allowlist is re-read from secrets
-    on *every* run (R21.5, R20.9), so removing an address locks that person out
+    on *every* run (R21.7, R20.9), so removing an address locks that person out
     on their next message regardless of any cookie. Accepted trade-off: a
     stolen browser session authenticates for up to 30 days without touching
     Google. Bounding that needs an absolute session age from `iat`, a
@@ -148,7 +148,7 @@ def signed_in(user):
 
 
 def current_identity():
-    """The identity port's adapter (R21.13) — one seam, now a real one.
+    """The identity port's adapter (R21.15) — one seam, now a real one.
 
     Reads the authenticated session rather than an environment variable. The
     port's shape is unchanged, which is the whole point of having had one:
@@ -175,26 +175,55 @@ def current_identity():
     )
 
 
-def render_sign_in() -> None:
-    """The whole app, for a visitor who has not signed in (R21.2)."""
-    st.title("Interview Prep")
-    st.write(
-        "This app runs mock job interviews. Sign in to continue — access is "
-        "limited to accounts the operator has authorized."
-    )
+def sign_in() -> None:
+    """Start the OIDC flow. Only ever from a click — never from a script run."""
     try:
         st.login()
     except Exception as exc:
         # A missing `[auth]` block or an absent Authlib is a deployment fault,
         # not a user error, and saying so beats an unexplained traceback.
+        st.session_state["sign_in_error"] = str(exc)
+
+
+def render_sign_in() -> None:
+    """The whole app, for a visitor who has not signed in (R21.2).
+
+    `st.login()` is behind a button, and must stay there. Calling it in the
+    script body — as the first version did — redirects on every anonymous run,
+    which breaks three things at once:
+
+    * **Sign-out cannot work.** `st.logout()` enqueues a redirect to
+      `/auth/logout`, the same run then falls through to here and enqueues a
+      second redirect to `/auth/login`, and the browser applies the last one.
+      The provider still holds its own session, so the person is signed
+      straight back in. The Sign-out button that R21.21 exists for was
+      unusable, on this page and on the not-authorized page both.
+    * **The copy below is never read**, because the page navigates away before
+      it paints.
+    * **Cancelling at the provider loops.** The bounce back to `/` immediately
+      redirects to the provider again, with no state in which to stop.
+
+    Streamlit's own documented pattern puts `st.login()` behind a widget for
+    exactly this reason. Found by the WP2 code-review, not by the tests: the
+    sign-out test stubs `st.logout` with a no-op, so the follow-on rerun never
+    reached this function.
+    """
+    st.title("Interview Prep")
+    st.write(
+        "This app runs mock job interviews. Sign in to continue — access is "
+        "limited to accounts the operator has authorized."
+    )
+    st.button("Sign in with Google", type="primary", on_click=sign_in)
+    error = st.session_state.get("sign_in_error")
+    if error:
         st.error(
             "Sign-in is not configured on this deployment, so it cannot be "
-            f"used yet. ({exc})"
+            f"used yet. ({error})"
         )
 
 
 def render_not_authorized(identity) -> None:
-    """R21.11: refused, told why, told which account, offered a way out.
+    """R21.13: refused, told why, told which account, offered a way out.
 
     Two refusals with different causes and different fixers, so they get
     different words. "Not on the allowlist" is for the operator to fix in
@@ -402,10 +431,10 @@ def sync_knowledgebase(api_key, identity):
 
 def main() -> None:
     # Authentication and authorization first, before a key is even read
-    # (R21.2, R21.9). Every turn spends the operator's own credit, so an
+    # (R21.2, R21.11). Every turn spends the operator's own credit, so an
     # unauthorized visitor must not reach a model selector, an uploader, or a
     # chat box — and `st.stop()` here means they reach none of them. The agent
-    # refuses independently (R21.10); this exists so the refusal is legible,
+    # refuses independently (R21.12); this exists so the refusal is legible,
     # not so it is enforced.
     identity = current_identity()
     if not signed_in(getattr(st, "user", None)):

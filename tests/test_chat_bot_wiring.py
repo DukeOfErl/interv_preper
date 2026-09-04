@@ -196,7 +196,7 @@ def test_an_anonymous_visitor_is_not_offered_the_chat(isolated_config):
 def test_an_unauthorized_email_gets_the_not_authorized_page(isolated_config, tmp_path):
     write_roles(tmp_path, {"operator@example.com": "dev"})
     app = run_app(isolated_config, logged_in("stranger@example.com"))
-    # Told which address they signed in as (R21.9) — asserted structurally
+    # Told which address they signed in as (R21.11) — asserted structurally
     # (a widget carries exactly that value) rather than pinned to wording.
     codes = [c.value for c in app.get("code")]
     assert "stranger@example.com" in codes
@@ -254,7 +254,7 @@ def test_a_stale_exp_claim_does_not_end_the_session(isolated_config, tmp_path):
 def test_removing_an_address_from_the_table_locks_it_out_on_the_next_run(
     isolated_config, tmp_path
 ):
-    """R21.5/R20.9: the allowlist is the revocation path, and it is per-run.
+    """R21.7/R20.9: the allowlist is the revocation path, and it is per-run.
 
     This is what makes dropping the `exp` check safe. A 30-day cookie does not
     outlive the operator's decision, because the table is consulted again on
@@ -279,7 +279,7 @@ def test_removing_an_address_from_the_table_locks_it_out_on_the_next_run(
     assert tab_labels(app) == [], tab_labels(app)
 
 
-# --- 7: R21.8 — a missing/unreadable table authorizes nobody, dev included --
+# --- 7: R21.10 — a missing/unreadable table authorizes nobody, dev included --
 
 
 def test_a_missing_roles_table_authorizes_nobody_including_a_would_be_dev(
@@ -319,7 +319,7 @@ def test_the_browser_cannot_promote_itself(isolated_config, tmp_path):
     assert set(tab_labels(app)) == USER_TABS
 
 
-# --- 9: R21.6 — casing is not a security boundary ---------------------------
+# --- 9: R21.8 — casing is not a security boundary ---------------------------
 
 
 def test_email_casing_does_not_prevent_authorization(isolated_config, tmp_path):
@@ -362,7 +362,7 @@ def test_a_signed_in_user_is_offered_sign_out(isolated_config, tmp_path):
     """Without this, leaving means clearing a cookie by hand.
 
     Streamlit's session is a 30-day cookie that outlives the browser tab
-    (R21.6), so "I closed it" is not signing out. On a shared machine that is
+    (R21.8), so "I closed it" is not signing out. On a shared machine that is
     an exposure, not an inconvenience — the next person gets the interview,
     the uploaded resume, and the operator's API budget.
     """
@@ -400,3 +400,49 @@ def test_an_anonymous_visitor_is_not_offered_sign_out(isolated_config):
     # there. The sign-in page is its own screen.
     app = run_app(isolated_config, ANONYMOUS_USER)
     assert "Sign out" not in sidebar_buttons(app), sidebar_buttons(app)
+
+
+# --- R21.2: signing in is a click, never a side effect of rendering ---------
+
+
+def test_an_anonymous_run_does_not_start_the_oidc_flow(isolated_config):
+    """The HIGH the code-review found, asserted so it cannot come back.
+
+    `st.login()` in the script body redirects on every anonymous run. That
+    makes sign-out impossible: `st.logout()` enqueues a redirect to
+    `/auth/logout`, the same run falls through to the sign-in page and enqueues
+    a second redirect to `/auth/login`, and the browser applies the last one —
+    so the person is bounced back in with the provider's session intact. It
+    also means the sign-in copy is never readable and cancelling at the
+    provider loops forever.
+
+    The previous sign-out test could not catch this: it stubs `st.logout` with
+    a no-op, so `st.user` is never cleared and the follow-on rerun never
+    reaches `render_sign_in`.
+    """
+    called = []
+    isolated_config.setattr(st, "login", lambda *a, **k: called.append(True))
+
+    app = run_app(isolated_config, ANONYMOUS_USER)
+    assert not called, "rendering the sign-in page started the OIDC flow"
+    assert "Sign in with Google" in [b.label for b in app.button], [
+        b.label for b in app.button
+    ]
+
+
+def test_the_sign_in_button_starts_the_oidc_flow(isolated_config):
+    # The other direction: behind a button is only correct if the button works.
+    called = []
+    isolated_config.setattr(st, "login", lambda *a, **k: called.append(True))
+
+    app = run_app(isolated_config, ANONYMOUS_USER)
+    [button] = [b for b in app.button if b.label == "Sign in with Google"]
+    button.click().run()
+    assert called, "the Sign in button rendered but never called st.login"
+
+
+def test_the_sign_in_copy_is_actually_rendered(isolated_config):
+    # It was unreadable before, because the page navigated away first.
+    app = run_app(isolated_config, ANONYMOUS_USER)
+    body = " ".join(m.value for m in app.markdown)
+    assert "Sign in to continue" in body, body[:300]

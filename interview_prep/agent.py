@@ -71,7 +71,7 @@ class InterviewAgent:
         identity=None,
     ):
         self.model = model
-        # The proof of authorization (R21.11). Kept as given rather than
+        # The proof of authorization (R21.13). Kept as given rather than
         # coerced: `stream_reply` refuses anything that is not an `Identity`
         # saying it is authorized, so a truthy stand-in cannot be mistaken for
         # one. Defaults to None so a caller that never heard of authorization
@@ -128,7 +128,7 @@ class InterviewAgent:
         ]
 
     def _require_authorized(self):
-        """Refuse a turn without an authorized identity (R21.10, R21.11).
+        """Refuse a turn without an authorized identity (R21.12, R21.13).
 
         Delegates to the shared guard so the wording and the `isinstance` rule
         are identical across all six paid clients. Unlike the other five, this

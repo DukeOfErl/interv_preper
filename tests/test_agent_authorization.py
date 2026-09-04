@@ -1,4 +1,4 @@
-"""The agent refuses to spend without an authorized identity (R21.10, R21.11).
+"""The agent refuses to spend without an authorized identity (R21.12, R21.13).
 
 This is the half of the guard that does not live in the page. `chat_bot.py`
 refuses early so the message is clean, but `evals/` and `tests/` reach the
@@ -109,7 +109,7 @@ def test_constructing_the_agent_without_an_identity_at_all_is_refused():
     ids=["role-string", "bare-role", "true", "one", "dict", "object"],
 )
 def test_something_that_merely_looks_authorized_is_not(impostor):
-    """R21.11 says the caller passes something that says, in as many words,
+    """R21.13 says the caller passes something that says, in as many words,
     that it is authorized. A truthy value is not that."""
     with pytest.raises(Unauthorized):
         drive(impostor)

@@ -1,4 +1,4 @@
-"""Every paid client refuses without an authorized identity (R21.10, ADR-0200).
+"""Every paid client refuses without an authorized identity (R21.12, ADR-0200).
 
 ADR-0200 counted the money and found **six** clients that spend the operator's
 OpenRouter credit: the agent, the guardrail, the query condenser, the web
@@ -22,6 +22,8 @@ key into its own hands and is past anything this module could enforce.
 """
 
 from __future__ import annotations
+
+import pathlib
 
 import pytest
 
@@ -144,29 +146,79 @@ def test_an_injected_client_needs_no_identity():
     assert QueryCondenser(api_key="k", client=object()) is not None
 
 
-def test_the_count_in_the_adr_matches_the_code():
-    """ADR-0200 says six paid clients. Assert the number, mechanically.
+PAID_CLIENT_CONSTRUCTORS = ("ChatOpenAI", "OpenAIEmbeddings", "OpenAI")
 
-    A seventh client added without a guard is the whole failure mode here, and
-    it would otherwise be caught by nobody — `grep` is what found the last one.
-    """
-    import pathlib
+#: ADR-0200 counted the money and found six. Asserted as a number, not just as
+#: a set difference, so a seventh construction is a visible failure even if it
+#: lands in a module that already guards one.
+EXPECTED_PAID_CLIENTS = 6
+
+
+def paid_client_constructions():
+    """Every place `interview_prep` builds a client that spends money."""
     import re
 
-    root = pathlib.Path("interview_prep")
-    constructions = []
+    # Absolute, because pytest can be invoked from any cwd. The first version
+    # of this used `pathlib.Path("interview_prep")`, so running from anywhere
+    # but the repo root globbed nothing, found zero constructions, and passed
+    # green having checked absolutely nothing — the same silent-pass shape this
+    # whole file exists to prevent. Every other path-sensitive test on this
+    # branch was made absolute for exactly this reason.
+    root = pathlib.Path(__file__).resolve().parent.parent / "interview_prep"
+    found = []
     for path in sorted(root.glob("*.py")):
         source = path.read_text()
-        for match in re.finditer(r"\b(ChatOpenAI|OpenAIEmbeddings|OpenAI)\(", source):
-            constructions.append(f"{path.name}:{match.group(1)}")
+        for line_no, line in enumerate(source.splitlines(), 1):
+            for name in PAID_CLIENT_CONSTRUCTORS:
+                if re.search(rf"(?<![\w.]){name}\(", line):
+                    found.append((path.name, line_no, name, line.strip()))
+    return found
 
-    guarded = {
-        path.name
-        for path in sorted(root.glob("*.py"))
-        if "require_authorized" in path.read_text()
-    }
-    unguarded = {c.split(":")[0] for c in constructions} - guarded
-    assert not unguarded, (
-        f"paid clients with no authorization guard: {sorted(unguarded)}. "
-        f"ADR-0200 requires every one of them to refuse. Found: {constructions}"
+
+def test_every_paid_client_construction_is_guarded():
+    """ADR-0200's claim, asserted mechanically rather than in prose.
+
+    The ADR says six paid clients must refuse without an authorized identity,
+    and the first implementation guarded one — which `grep` found and no test
+    did. This is the standing check.
+
+    It looks at each CONSTRUCTION, not each module. Checking per module (the
+    first version did) is satisfied by `agent.py`'s `require_authorized`
+    re-export line alone, so a second, unguarded `OpenAI(...)` added to any
+    module that already imports the name would pass silently.
+    """
+    constructions = paid_client_constructions()
+
+    assert len(constructions) == EXPECTED_PAID_CLIENTS, (
+        f"ADR-0200 says {EXPECTED_PAID_CLIENTS} paid clients; found "
+        f"{len(constructions)}: {[(f, n, k) for f, n, k, _ in constructions]}. "
+        "A new one needs an authorization guard AND an entry in this file's "
+        "PAID_CLIENTS table — or the ADR needs amending."
     )
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "interview_prep"
+    unguarded = []
+    for filename, line_no, name, text in constructions:
+        source = (root / filename).read_text()
+        # The guard must be called in the same module, not merely imported.
+        if "require_authorized(" not in source.replace(
+            "from .authorization import", ""
+        ):
+            unguarded.append(f"{filename}:{line_no} {name}")
+    assert not unguarded, (
+        f"paid clients with no authorization guard: {unguarded}. "
+        "ADR-0200 requires every one of them to refuse."
+    )
+
+
+def test_the_construction_scan_actually_finds_something():
+    """The scan must prove it can see, or its all-clear means nothing.
+
+    A path bug, a renamed package or a changed constructor name would all make
+    `paid_client_constructions()` return an empty list, and an empty list
+    satisfies every "nothing unguarded" assertion trivially.
+    """
+    constructions = paid_client_constructions()
+    assert constructions, "the scan found no paid clients at all — it is broken"
+    modules = {f for f, _, _, _ in constructions}
+    assert "agent.py" in modules, modules
