@@ -8,7 +8,6 @@ and drives the Streamlit chat loop.
 
 import os
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -115,32 +114,37 @@ def user_claim(user, name):
 
 
 def signed_in(user):
-    """Whether there is a live authenticated session (R21.2, R21.4).
+    """Whether Streamlit has an authenticated session for this browser (R21.2).
 
     Separate from *authorized* on purpose, and the gate needs both: a visitor
     who is not signed in must be sent to `st.login()`, while one who is signed
     in but refused must not be — `st.login()` redirects unconditionally, so
-    sending an already-authenticated user there is an infinite redirect loop
-    rather than a message. Found by the WP2 red-team.
+    sending an already-authenticated user there loops forever instead of
+    showing a message.
+
+    This deliberately does **not** re-check the ID token's `exp` claim, and an
+    earlier version's doing so was a category error worth recording. An ID
+    token is not a session: it is a one-time signed assertion that the person
+    proved their identity at `iat`, and `exp` bounds how long a relying party
+    should accept it *as proof of a fresh login*. The standard flow — which
+    Streamlit already implements — verifies it once at the OAuth callback and
+    then mints its own session, `_streamlit_user`, a signed cookie with
+    `Max-Age` of 30 days. `st.user` reads that cookie once at session start, so
+    `exp` is frozen at login and never refreshes. Re-checking it every run
+    therefore converted Google's ~1-hour token lifetime into a hard 1-hour cap
+    that dropped a candidate's transcript, documents and evaluations mid-
+    interview, which no service behaves like.
+
+    What that check was reaching for is revocation, and `role_table()` already
+    provides it, immediately and better: the allowlist is re-read from secrets
+    on *every* run (R21.5, R20.9), so removing an address locks that person out
+    on their next message regardless of any cookie. Accepted trade-off: a
+    stolen browser session authenticates for up to 30 days without touching
+    Google. Bounding that needs an absolute session age from `iat`, a
+    deliberate policy rather than a side effect of a token lifetime, and is
+    deferred (R21.20).
     """
-    return bool(getattr(user, "is_logged_in", False)) and not token_has_expired(user)
-
-
-def token_has_expired(user):
-    """Whether the identity token's `exp` claim is in the past (R21.4).
-
-    Streamlit parses the token but explicitly does **not** check issuance or
-    expiry, so without this a session outlives the credential that justified
-    it — R20.9's "resolve on each run" applied to something that can go stale
-    on its own. Unreadable or absent `exp` is treated as *not* expired: the
-    allowlist is what authorizes, and refusing to serve an authorized user
-    because a claim was missing punishes the wrong person.
-    """
-    try:
-        exp = user_claim(user, "exp")
-        return exp is not None and float(exp) < time.time()
-    except Exception:
-        return False
+    return bool(getattr(user, "is_logged_in", False))
 
 
 def current_identity():
@@ -190,13 +194,36 @@ def render_sign_in() -> None:
 
 
 def render_not_authorized(identity) -> None:
-    """R21.9: refused, told why, told which account, offered a way out."""
+    """R21.11: refused, told why, told which account, offered a way out.
+
+    Two refusals with different causes and different fixers, so they get
+    different words. "Not on the allowlist" is for the operator to fix in
+    secrets. "Provider did not assert verification" cannot be fixed there at
+    all — the allowlist is working correctly and the provider is the problem —
+    and the first version of this page sent the operator to edit `[roles]`
+    anyway, where nothing they did would help.
+    """
     st.title("Not authorized")
-    st.write(
-        "You are signed in, but this account is not on the authorized list "
-        "for this app. If you believe it should be, ask the operator to add "
-        "the address below."
-    )
+    if getattr(identity, "refusal", None) == "unverified":
+        st.write(
+            "You are signed in, but the identity provider did not confirm that "
+            "this address is verified, so it cannot be matched against the "
+            "authorized list. **This is a deployment setting, not a problem "
+            "with your account** — adding the address to the list will not "
+            "change it."
+        )
+        st.caption(
+            "This app requires the `email_verified` claim, because an "
+            "unverified address proves nothing about who owns it. Google "
+            "provides it; some providers (Microsoft Entra ID among them) do "
+            "not send it at all."
+        )
+    else:
+        st.write(
+            "You are signed in, but this account is not on the authorized list "
+            "for this app. If you believe it should be, ask the operator to add "
+            "the address below."
+        )
     st.code(identity.email or "(no email address on this account)")
     st.write("Signed in with the wrong account? Sign out and try another.")
     st.button("Sign out", on_click=st.logout)

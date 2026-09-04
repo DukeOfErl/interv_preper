@@ -89,6 +89,14 @@ class Identity:
 
     email: str | None = None
     role: Role | None = None
+    #: Why a refusal happened, for wording alone — never for deciding access.
+    #: `"unverified"` means the provider signed the person in but did not
+    #: assert the address is verified, which is a *deployment* problem: the
+    #: allowlist cannot help, and telling the operator to edit it (as the first
+    #: version did) sends them after a fault that is not there. Google emits
+    #: `email_verified`; Microsoft Entra ID does not emit it at all, so on that
+    #: provider every user is refused and only this field explains it.
+    refusal: str | None = None
 
     @property
     def is_authorized(self) -> bool:
@@ -151,9 +159,10 @@ def authorize(email, *, table, email_verified=False) -> Identity:
 
     if email_verified is not True:
         # Carried, not discarded: the page names the address it refused
-        # (R21.9), which is also how an operator notices someone trying to
-        # sign in as them.
-        return Identity(email=normalised)
+        # (R21.11), which is also how an operator notices someone trying to
+        # sign in as them — and says *why*, because "not verified" and "not on
+        # the list" need different fixes by different people.
+        return Identity(email=normalised, refusal="unverified")
 
     # An unusable table authorizes nobody (R21.8). `items()` rather than a
     # lookup, because the table's own keys need normalising too — an operator
@@ -163,7 +172,7 @@ def authorize(email, *, table, email_verified=False) -> Identity:
     try:
         entries = list(table.items())
     except Exception:
-        return Identity(email=normalised)
+        return Identity(email=normalised, refusal="not_allowlisted")
 
     for key, role_name in entries:
         if _normalise(key) == normalised:
@@ -171,4 +180,4 @@ def authorize(email, *, table, email_verified=False) -> Identity:
             # access (R21.7): `resolve_role` already fails closed to USER.
             return Identity(email=normalised, role=resolve_role(role_name))
 
-    return Identity(email=normalised)
+    return Identity(email=normalised, refusal="not_allowlisted")

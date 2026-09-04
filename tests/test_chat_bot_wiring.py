@@ -227,15 +227,57 @@ def test_an_authorized_user_sees_only_interview_and_evaluations(isolated_config,
     assert set(tab_labels(app)) == USER_TABS
 
 
-# --- 6: R21.4 — an expired token is anonymous, even if is_logged_in is True -
+# --- 6: R21.4 — a session is NOT capped by the ID token's lifetime ----------
 
 
-def test_an_expired_token_is_treated_as_anonymous(isolated_config, tmp_path):
+def test_a_stale_exp_claim_does_not_end_the_session(isolated_config, tmp_path):
+    """The inverse of what this test used to assert, and deliberately so.
+
+    An earlier version re-checked the ID token's `exp` on every run and treated
+    a past value as anonymous. That was a category error: an ID token is a
+    one-time assertion that the person authenticated at `iat`, not a session.
+    Streamlit verifies it once at the OAuth callback and then mints its own
+    30-day `_streamlit_user` cookie, which `st.user` reads once at session
+    start — so `exp` is frozen at login. Re-checking it turned Google's ~1-hour
+    token lifetime into a hard 1-hour cap that destroyed a candidate's
+    transcript, documents and evaluations mid-interview.
+
+    Revocation, which that check was reaching for, is the allowlist's job and
+    already immediate: `role_table()` is re-read every run (see the test
+    below).
+    """
     write_roles(tmp_path, {"dev@example.com": "dev"})
-    expired = logged_in("dev@example.com", exp=time.time() - 3600)
-    app = run_app(isolated_config, expired)
-    assert tab_labels(app) == []
-    assert len(app.get("chat_input")) == 0
+    stale = logged_in("dev@example.com", exp=1)  # long past, and irrelevant
+    app = run_app(isolated_config, stale)
+    assert DIAGNOSTIC_TABS <= set(tab_labels(app)), tab_labels(app)
+
+
+def test_removing_an_address_from_the_table_locks_it_out_on_the_next_run(
+    isolated_config, tmp_path
+):
+    """R21.5/R20.9: the allowlist is the revocation path, and it is per-run.
+
+    This is what makes dropping the `exp` check safe. A 30-day cookie does not
+    outlive the operator's decision, because the table is consulted again on
+    every single interaction.
+
+    Scope, stated so nobody reads more into a green run than it earns:
+    `write_roles` resets the `st.secrets` cache itself, so what this proves is
+    that *the gate* re-reads the table and holds no cached role. Whether
+    `st.secrets` picks up an edited file is Streamlit's mechanism, not ours —
+    it watches the file locally, and on Streamlit Cloud a secrets edit restarts
+    the app. Neither is asserted here.
+    """
+    write_roles(tmp_path, {"dev@example.com": "dev"})
+    user = logged_in("dev@example.com")
+    app = run_app(isolated_config, user)
+    assert DIAGNOSTIC_TABS <= set(tab_labels(app))
+
+    # The operator removes them; the browser session is untouched.
+    write_roles(tmp_path, {"someone-else@example.com": "dev"}, name="secrets.toml")
+    app.run()
+    assert not app.exception, [str(e.value)[:200] for e in app.exception]
+    assert tab_labels(app) == [], tab_labels(app)
 
 
 # --- 7: R21.8 — a missing/unreadable table authorizes nobody, dev included --

@@ -287,3 +287,58 @@ def test_an_unverified_address_is_still_reported_back():
     # that someone tried to sign in as an allowlisted address.
     identity = authorize("operator@example.com", table=TABLE, email_verified=False)
     assert identity.email == "operator@example.com"
+
+
+# --- the refusal reason (wording only, never access) ------------------------
+#
+# Found by the WP2 code-review: requiring `email_verified` is correct against
+# the red-team's bypass, but `st.login` is provider-agnostic and Microsoft
+# Entra ID does not emit the claim at all — so on that provider everyone is
+# refused, and the first version of the page told the operator to add the
+# address to `[roles]`, where nothing they did would help. The reason exists so
+# the two refusals can be worded apart. It must never decide access.
+
+
+def test_an_unverified_claim_is_reported_as_unverified():
+    identity = authorize("operator@example.com", table=TABLE, email_verified=False)
+    assert not identity.is_authorized
+    assert identity.refusal == "unverified"
+
+
+def test_a_missing_provider_claim_is_reported_as_unverified():
+    # Entra ID's actual shape: the claim is simply absent, so the adapter
+    # passes None. That is a deployment fault, not an allowlist fault.
+    identity = authorize("operator@example.com", table=TABLE, email_verified=None)
+    assert identity.refusal == "unverified"
+
+
+def test_a_stranger_is_reported_as_not_allowlisted():
+    identity = authorize(
+        "stranger@example.com", table=TABLE, email_verified=True
+    )
+    assert not identity.is_authorized
+    assert identity.refusal == "not_allowlisted"
+
+
+def test_an_unusable_table_reads_as_not_allowlisted():
+    # From the person's side it is indistinguishable, and should be: telling a
+    # visitor the operator's secrets are malformed tells them about the
+    # deployment's internals for no benefit to them.
+    identity = authorize("operator@example.com", table=None, email_verified=True)
+    assert identity.refusal == "not_allowlisted"
+
+
+def test_an_authorized_identity_carries_no_refusal():
+    identity = authorize("operator@example.com", table=TABLE, email_verified=True)
+    assert identity.is_authorized
+    assert identity.refusal is None
+
+
+def test_the_reason_cannot_grant_access():
+    """Wording is not authority.
+
+    A hand-built `Identity` claiming any reason at all still holds no role, so
+    nothing downstream can be talked into admitting it.
+    """
+    for reason in (None, "unverified", "not_allowlisted", "authorized", True):
+        assert not Identity(email="x@example.com", refusal=reason).is_authorized
