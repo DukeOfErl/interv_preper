@@ -1,6 +1,6 @@
 # Requirements — Interview Preparation Chatbot
 
-A behavioral specification of the app, written so it could be refactored or re-implemented from scratch. It describes *what* the app does, not *how* the current code does it (implementation notes appear only where the behavior depends on them). Sections 1–15 describe the **current app** (§15 is document RAG, implemented — except R15.14, still pending); section 16 is **planned scope** (web-sourced knowledge) and is written as target behavior; sections 17-19 (curated knowledge base, evaluation cards, GitHub portfolio tools over MCP) describe the **current app**.
+A behavioral specification of the app, written so it could be refactored or re-implemented from scratch. It describes *what* the app does, not *how* the current code does it (implementation notes appear only where the behavior depends on them). Sections 1–15 describe the **current app** (§15 is document RAG, implemented — except R15.14, still pending); section 16 is **planned scope** (web-sourced knowledge) and is written as target behavior; sections 17-19 (curated knowledge base, evaluation cards, GitHub portfolio tools over MCP) and sections 20-21 (roles and permissions, authentication and authorization) describe the **current app**; section 22 (per-identity spend cap) is **planned scope**, written as target behavior.
 
 ## 1. Purpose
 
@@ -223,8 +223,8 @@ The application code is a thin shell around both.
 ### Deferred (each its own work package and ADR)
 
 - **R20.12** *(deferred)* **Authentication.** Replacing the override with a real identity provider. Until it lands there is no authentication: the role is configuration, and the deployment is only as private as its URL. This must be stated wherever the deployment is documented.
-- **R20.13** *(deferred)* **Per-role API key.** A `dev` role may spend the app's own `OPENROUTER_API_KEY`; a `user` role supplies its own through the existing sidebar input. Amends R3.1–R3.3.
-- **R20.14** *(deferred)* **Per-identity spend cap**, enforced where spend is accrued rather than where it is displayed. It requires durable storage that survives a container restart, which runs against ADR-0110's stated principle that no database ever needs hosting — so it is its own decision, not a detail of this one.
+- **R20.13** *(withdrawn — superseded by § 22)* **Per-role API key.** A `dev` role may spend the app's own `OPENROUTER_API_KEY`; a `user` role supplies its own through the existing sidebar input. Amends R3.1–R3.3. **Withdrawn** because it was written before authentication existed, when a `user` was any stranger who found the URL and asking them to fund their own turns was the only defence. § 21 replaced that: every user is now explicitly allowlisted by the operator, who invited them. Asking an invited candidate to obtain and paste an OpenRouter key solves a problem that no longer exists, at the cost of the thing the app is for. The operator pays for everyone, and the per-identity cap (§ 22) is the only spend control.
+- **R20.14** *(specified in § 22)* **Per-identity spend cap**, enforced where spend is accrued rather than where it is displayed. It requires durable storage that survives a container restart, which runs against ADR-0110's stated principle that no database ever needs hosting — so it is its own decision, not a detail of this one.
 
 ## 21. Authentication & authorization
 
@@ -269,4 +269,46 @@ The application code is a thin shell around both.
 ### Deferred
 
 - **R21.20** *(deferred)* **Absolute session age.** Re-authenticate after a fixed period measured from the token's `iat`, bounding R21.6's 30-day window. Deliberately separate from R21.4: a session length the operator chooses, not one inherited from whatever lifetime a provider happens to give its ID tokens.
-- **R21.19** *(deferred)* Per-identity audit of spend, which becomes possible once every turn has a stable email attached to it. It is the natural foundation for R20.14's spend cap and should be decided with it, not before.
+- **R21.19** *(satisfied by § 22)* Per-identity audit of spend, which becomes possible once every turn has a stable email attached to it. It is the natural foundation for R20.14's spend cap and should be decided with it, not before — and was: the durable per-email ledger in R22.1 **is** this audit, so it needs no separate work (R22.19).
+
+## 22. Per-identity spend cap
+
+*(Implements R20.14, and withdraws R20.13. Design rationale: ADR-0210.)*
+
+**Why a cap and not a per-user key.** § 21 made every user someone the operator explicitly invited. The operator therefore pays for every turn anyone takes, and the only remaining question is how much any one person may spend before the app stops serving them. R20.13's answer — make the guest bring their own key — is withdrawn: it defends the operator's wallet by removing the reason to visit.
+
+**What makes this hard is not the arithmetic.** A cap is a comparison. It is hard because the number being compared has to be *true* — it must count every client that spends, survive a container restart, and be read fresh on a machine that may not be the one that wrote it. Each of those is a place where a cap can report success while holding nothing.
+
+### What is counted
+
+- **R22.1** The ledger counts **actual USD spend per authenticated email**, accumulated as a **lifetime** total. No period, no reset. A period is a later decision and must not be anticipated by speculative schema.
+- **R22.2** **Every paid client is counted.** At the time of writing the app has six — the agent stream, web research, the pre-send guardrail, the query condenser, and two embedding paths — and only the first two accrue anything today (R10.4 counts `last_cost` plus `extra_cost`). The other four spend the operator's credit and report none of it. A cap that counts two of six is not a cap; it is a control that reports success without holding, and closing this gap is part of this work rather than a follow-up to it.
+- **R22.3** Where a client cannot report an actual cost, the same fallback ladder as R10.4 applies: reported tokens × catalog price, then estimated tokens × catalog price. **Unknown pricing degrades to zero here too** — and that is a deliberate hole, named so it is not mistaken for rigour: an unpriced model is uncapped. The alternative, refusing to serve any model whose price is unknown, was rejected as disproportionate.
+- **R22.4** **A turn that is refused after spending still records what it spent.** The guardrail runs *before* the reply and costs money whether or not the prompt is allowed; today a blocked turn calls `st.stop()` and accrues nothing. Spend that produced no output is still spend.
+
+### Where the refusal lives
+
+- **R22.5** The check is enforced **inside the operation that spends** (as R21.12 does for authorization), not only in the page. `evals/` and `tests/` reach the paid clients without passing through `chat_bot.py`, and a page-only cap protects one of three callers.
+- **R22.6** The check is made **before** the turn, comparing the identity's remaining budget against the **next-prompt estimate** the app already computes (R10.5, R15.12). Refusing only once the total is *already* over spends one full turn past the cap on every account.
+- **R22.7** **Overshoot by at most one turn is accepted**, and this is a property of the domain rather than a defect: a turn's true cost is known only after it completes. R22.6 narrows the window; it cannot close it. The accepted worst case is the cost of a single turn at the largest configured model.
+- **R22.8** At the cap the refusal is **hard**: the turn does not happen. No silent downgrade to a cheaper model — a user who is being served worse must be told, not quietly given a lesser product.
+- **R22.9** **The `dev` role is not capped.** This deliberately couples the cap to § 20's role model: a bug that mis-resolves someone as `dev` makes them unbounded, so the cap check reads `identity.role` and that coupling carries its own test rather than being left implicit.
+
+### Durability
+
+- **R22.10** The ledger is **durable across container restarts**. Streamlit Community Cloud recycles containers freely, so the `data/knowledgebase.db` pattern (ADR-0110) cannot serve here: a total that resets on recycle is not a cap, and the reset is invisible.
+- **R22.11** The ledger is **read and written on every turn**, and the store is the single source of truth. An in-process total is a cache of it, never the authority — two containers may serve the same person concurrently.
+- **R22.12** **An unreachable store fails closed**: no total, no turn. This is the second place (after R21.10) where failing closed is expensive rather than cheap, and the honest cost is a new hard dependency — the database being down takes the app down. Accepted, because the alternative is an outage that silently uncaps every account.
+- **R22.13** The two refusals must be **distinguishable to the user**: "you have reached your spend limit" and "the app cannot reach its ledger and is refusing to spend" are different facts, and the second is a deployment fault the user can neither cause nor fix. Telling someone they are out of budget when the database is down is a lie the operator will hear about.
+
+### Shape of the seam
+
+- **R22.14** The ledger sits behind a **port** — the same pattern as the identity port (§ 20, R21.15): a small protocol (`total for an email`, `record a spend against an email`) with the database as one adapter. The cap **policy** — remaining, estimate, role, and the resulting allow-or-refuse — is a **pure function** importing neither Streamlit nor any database driver, so the same rule serves the page, the agent path, and the tests.
+- **R22.15** **The test suite must not require a live database** (extends R21.18). An in-memory adapter satisfies the port, and the policy is tested directly. No test may depend on network reachability or on a credential.
+- **R22.16** The connection string is a **secret** (`secrets.toml`, never committed, never in `.env.example`), and the cap amount is operator configuration alongside it.
+
+### Consequences for what already exists
+
+- **R22.17** (amends **R10.1**) The sidebar's spend display gains the identity's remaining budget. What a `dev` sees is unchanged; an uncapped role has nothing to show.
+- **R22.18** (amends **R10.4**) Accrued spend stops being session-scoped. `total_cost` in session state becomes a display of this turn's contribution to a durable per-identity total, not the total itself.
+- **R22.19** (satisfies **R21.19**) Per-identity audit of spend was deferred pending this decision. A durable per-email ledger *is* that audit, and R21.19 is met by R22.1 rather than needing its own work.
