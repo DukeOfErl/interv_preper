@@ -27,7 +27,10 @@ from langchain.agents.middleware import (
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from .authorization import Identity
+# `Unauthorized` is re-exported: it is raised by six clients, so it lives in
+# the pure module rather than here, but callers still import it from the
+# agent they were refused by.
+from .authorization import Identity, Unauthorized, require_authorized  # noqa: F401
 from .config import OPENROUTER_BASE_URL, TYPING_DELAY_SECONDS
 from .middleware import (
     TOOL_CALL_BUDGET,
@@ -36,22 +39,6 @@ from .middleware import (
     catch_typed_tool_call,
     content_policy_middleware,
 )
-
-
-class Unauthorized(Exception):
-    """Raised when a turn is attempted without an authorized identity.
-
-    Deliberately an exception rather than an empty reply or a polite refusal
-    string: this is a programming or configuration fault on every path that
-    can reach it, and a caller that swallows it silently is the failure this
-    guard exists to prevent.
-
-    Nothing catches this. `chat_bot.main()` refuses and calls `st.stop()`
-    before an agent is ever constructed, so the page cannot reach it; every
-    remaining path here is a caller that forgot, and a traceback is the right
-    answer for one of those. (An earlier version of this docstring claimed the
-    page caught and reworded it. It never did.)
-    """
 
 
 def tool_failure_message(exc):
@@ -143,27 +130,12 @@ class InterviewAgent:
     def _require_authorized(self):
         """Refuse a turn without an authorized identity (R21.10, R21.11).
 
-        The guard lives here rather than only in `chat_bot.main()` because
-        `evals/` and `tests/` reach this object without passing through the
-        page, so a refusal in the page protects one of three callers — and
-        nothing announces the day a fourth is added. Every turn spends the
-        operator's own credit, which is what makes this the operation worth
-        guarding rather than the rendering of it.
-
-        `isinstance` rather than a truth test: R21.11 requires the caller to
-        pass something that *says* it is authorized. A bare `True`, a role, or
-        a dict that happens to be truthy is not that, and accepting one would
-        make the guard satisfiable by accident.
+        Delegates to the shared guard so the wording and the `isinstance` rule
+        are identical across all six paid clients. Unlike the other five, this
+        one fires on the *turn* rather than in `__init__`: constructing an
+        agent costs nothing, `create_agent` and the stream are what spend.
         """
-        identity = self.identity
-        if isinstance(identity, Identity) and identity.is_authorized:
-            return
-        who = getattr(identity, "email", None) or "an unidentified caller"
-        raise Unauthorized(
-            f"refusing to spend on behalf of {who}: this turn has no authorized "
-            "identity. Pass `identity=` an authorized `Identity` from "
-            "`interview_prep.authorization.authorize`."
-        )
+        require_authorized(self.identity, "this turn")
 
     def stream_reply(
         self,

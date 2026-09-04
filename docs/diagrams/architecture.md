@@ -264,7 +264,7 @@ flowchart TB
         llmC["agent + accounting<br/>agent.py · middleware.py · pricing.py · context.py"]
         toolsC["tools + policy<br/>tools.py · policy.py · web_research.py · github_mcp.py"]
         uiC["rendering<br/>ui.py"]
-        access["roles + permissions<br/>permissions.py"]
+        access["who may be here, and what they may do<br/>authorization.py · permissions.py"]
     end
 
     mdfiles["prompts/*.md — interviewer behavior lives here, not in Python<br/>(personas + guardrail classifier prompt)"]
@@ -294,10 +294,21 @@ flowchart TB
     class kbfiles mdfile
 ```
 
-`permissions.py` has **no outgoing edges** — no markdown, no OpenRouter, no
-framework. That is deliberate (ADR-0190): the page, the agent path and the
-tests all ask the same object, so it may depend on nothing they don't share.
-`chat_bot.py` holds its only adapter, `role_lookup`.
+The access cluster has **no outgoing edges** — no markdown, no OpenRouter, no
+framework. That is deliberate (ADR-0190, ADR-0200): the page, the agent path
+and the tests all ask the same objects, so they may depend on nothing those
+three don't share. `chat_bot.py` holds the identity port's only adapter,
+`current_identity()`, which reads `st.user` and the `[roles]` table in
+`.streamlit/secrets.toml`.
+
+What the box hides is that the two files answer different questions, and the
+package's other clusters use them differently: `permissions.py` grades what an
+authorized role may *do* (one sidebar tab, so far), while
+`authorization.py` decides whether the caller may be here at all — and its
+`require_authorized` is called *inside* all six paid clients (in `safety`,
+`rag`, `llmC` and `toolsC`), not only by `entry`. Those six edges are left
+undrawn: they cross every cluster and would say only "everything that spends
+checks", which this sentence says better (R21.10).
 
 The full module-by-module list (what each file exports) lives in
 [`CLAUDE.md`](../../CLAUDE.md) and the [`README`](../../README.md) — inventories read

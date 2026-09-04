@@ -18,6 +18,7 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from .authorization import require_authorized
 from .config import (
     CHUNK_OVERLAP_CHARS,
     CHUNK_SIZE_CHARS,
@@ -43,7 +44,13 @@ class RetrievedChunk:
 class DocumentIndex:
     """Session-scoped vector index over the uploaded documents."""
 
-    def __init__(self, api_key, embedding_model, embeddings=None):
+    def __init__(self, api_key, embedding_model, embeddings=None, identity=None):
+        # Spends the operator's credit (R21.10, ADR-0200). Guarded here rather
+        # than in the caller because `evals/`, `tests/` and any future script
+        # reach this constructor without passing through the page. Only when
+        # the *real* client is built: an injected fake spends nothing.
+        if embeddings is None:
+            require_authorized(identity, "DocumentIndex")
         self.embedding_model = embedding_model
         # Allow injected embeddings (tests); otherwise embed via OpenRouter.
         # check_embedding_ctx_length uses tiktoken to pre-tokenize, which only

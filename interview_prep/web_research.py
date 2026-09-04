@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from openai import OpenAI
 
+from .authorization import require_authorized
 from .config import (
     OPENROUTER_BASE_URL,
     PROMPTS_DIR,
@@ -162,6 +163,7 @@ class WebResearcher:
         client=None,
         engine=WEB_SEARCH_ENGINE,
         max_results=WEB_SEARCH_MAX_RESULTS,
+        identity=None,
     ):
         self.model = model
         self.engine = engine
@@ -170,6 +172,12 @@ class WebResearcher:
             instructions if instructions is not None else load_web_research_prompt()
         )
         # Allow an injected client (tests); otherwise build the real one.
+        # Spends the operator's credit (R21.10, ADR-0200). Guarded here rather
+        # than in the caller because `evals/`, `tests/` and any future script
+        # reach this constructor without passing through the page. Only when
+        # the *real* client is built: an injected fake spends nothing.
+        if client is None:
+            require_authorized(identity, "WebResearcher")
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
 
     def research(self, query) -> ResearchResult:

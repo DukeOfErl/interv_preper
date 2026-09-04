@@ -77,11 +77,34 @@ The `.env` file is gitignored and loaded automatically at startup. Alternatively
 
 Optionally, set `GITHUB_PAT` in the same `.env` to enable the GitHub portfolio deep-dive: create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens) with read-only access to public repositories. Without it, the app runs normally minus that feature.
 
-### Roles (developer view)
+### Sign-in and access
 
-Set `INTERVIEW_PREP_ROLE=dev` in `.env` — or in Streamlit secrets when deployed — to see the **Developer** and **Warnings** sidebar tabs. Any other value, including unset or misspelled, is treated as a regular user and shows neither. Warnings you can act on (a rejected upload, a retrieval fallback, an unverified reference) still appear in the chat itself for every role.
+**Signing in is required, and signing in is not enough.** Access needs a Google (or other OIDC provider) sign-in *and* an entry for that address in the operator's allowlist. Every turn spends the operator's own OpenRouter credit, so a successful login — which any Google account holder in the world can complete — is not grounds to be served.
 
-> **This is configuration, not authentication.** The role is only settable server-side, never from the browser — but there is no login, so a deployed app is exactly as private as its URL. Per-user identity, per-user API keys, and per-user spend caps are planned separately (see `docs/REQUIREMENTS.md` § 20).
+Both halves are configured in `.streamlit/secrets.toml`, and **until they are, the app serves nobody** — not even the operator. Copy the template and fill it in:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # then edit it
+```
+
+1. **Register an OIDC client with your provider.** For Google, that is a *Web application* OAuth 2.0 Client ID in the Google Cloud Console (APIs & Services → Credentials). Note its client ID and client secret, and list your redirect URI under *Authorized redirect URIs*.
+2. **Write `[auth]`** into `.streamlit/secrets.toml`: `redirect_uri`, `cookie_secret` (a long random string you generate), `client_id`, `client_secret`, and `server_metadata_url` (for Google, `https://accounts.google.com/.well-known/openid-configuration`). This is read by Streamlit's native OIDC support, not by this app's code — no credential is ever handled here. It needs the `Authlib` dependency, which `uv sync` installs.
+3. **`redirect_uri` differs per environment and must match the provider's registration exactly** — scheme, host, port and path. Locally it is `http://localhost:8501/oauth2callback`; deployed it is `https://<your-app-host>/oauth2callback`. Register both if you run both. A drifted value fails at the provider with an error the app cannot explain.
+4. **Write `[roles]`** — the allowlist, mapping each authorized email to a role:
+
+   ```toml
+   [roles]
+   "operator@example.com" = "dev"
+   "candidate@example.com" = "user"
+   ```
+
+   Presence in this table is authorization; **absence is refusal**. A `dev` role additionally sees the **Developer** and **Warnings** sidebar tabs; a `user` sees Interview and Evaluations. An unrecognized role name still keeps access and just loses the extra tabs — a typo in secrets should cost a sidebar tab, not lock someone out — but an **absent, unreadable, or non-mapping `[roles]` table authorizes nobody, including you.** That direction is deliberate: a deployment that serves no one is noticed and fixed in minutes, while one that quietly admits the world to a funded API key produces no error and a bill. List your own address too; you are not exempt.
+
+Warnings you can act on (a rejected upload, a retrieval fallback, an unverified reference) still appear in the chat itself for every role.
+
+> **Never commit `.streamlit/secrets.toml`** — it holds a live client secret and your cookie signing key. Only the `.example` template belongs in git. On Streamlit Community Cloud, paste the same contents into the app's *Secrets* settings instead of committing a file.
+
+The email address the app trusts is the **verified** email claim from the provider (`email_verified`), because OIDC proves an address only if the provider says it verified it; a session without one is treated as not signed in. Sessions are re-checked on every run and an expired token is logged out. See `docs/REQUIREMENTS.md` § 21 and [ADR-0200](docs/decisions/0200-authentication-is-oidc-plus-an-explicit-allowlist.md); per-user API keys and per-user spend caps remain planned separately (§ 20).
 
 ## Run
 

@@ -38,6 +38,42 @@ from dataclasses import dataclass
 from .permissions import Role, resolve_role
 
 
+class Unauthorized(Exception):
+    """Raised when a paid operation is attempted without an authorized identity.
+
+    Lives here rather than in `agent.py` because it is raised by six different
+    paid clients, and none of them should have to import an agent framework to
+    refuse. Deliberately an exception rather than a polite empty result: every
+    path that can reach it is a programming or configuration fault, and a
+    caller that swallows it silently is the failure this guard exists to
+    prevent.
+    """
+
+
+def require_authorized(identity, what="this operation"):
+    """Refuse `what` unless `identity` is an authorized `Identity` (R21.10).
+
+    Called by every client that spends the operator's OpenRouter credit — the
+    agent, the guardrail, the query condenser, the web researcher, and the two
+    embedding sites. ADR-0200 counted six and the first implementation guarded
+    one, which is the failure shape this project keeps finding: a control that
+    looks like it covers spending while covering a sixth of it.
+
+    `isinstance` rather than a truth test, per R21.11: the caller must pass
+    something that *says* it is authorized. A bare `True`, a `Role`, or a
+    truthy dict is not that, and accepting one would make the guard
+    satisfiable by accident.
+    """
+    if isinstance(identity, Identity) and identity.is_authorized:
+        return
+    who = getattr(identity, "email", None) or "an unidentified caller"
+    raise Unauthorized(
+        f"refusing to spend on behalf of {who}: {what} has no authorized "
+        "identity. Pass `identity=` an authorized `Identity` from "
+        "`interview_prep.authorization.authorize`."
+    )
+
+
 @dataclass(frozen=True)
 class Identity:
     """A decided identity: who they are, and whether they may be here.

@@ -11,7 +11,19 @@ import os
 import pytest
 
 from interview_prep.config import GUARDRAIL_DOC_MODEL
+from interview_prep.authorization import authorize
 from interview_prep.guardrails import JailbreakGuard
+
+# These tests spend real credit against a live model, so they must declare an
+# authorized identity in as many words (R21.11) — exactly like every other
+# caller of a paid client. They are the clearest case for the guard: an
+# integration test IS a fourth caller, reaching the operation without the page.
+INTEGRATION_IDENTITY = authorize(
+    "integration-tests@example.com",
+    table={"integration-tests@example.com": "dev"},
+    email_verified=True,
+)
+
 
 pytestmark = pytest.mark.integration
 
@@ -23,7 +35,7 @@ requires_key = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def guard():
-    return JailbreakGuard(api_key=API_KEY)
+    return JailbreakGuard(api_key=API_KEY, identity=INTEGRATION_IDENTITY)
 
 
 @requires_key
@@ -66,7 +78,9 @@ def doc_guard():
     ``GUARDRAIL_DOC_MODEL`` — window-sized screening needs the larger model
     (see the rationale in ``config.py``).
     """
-    return JailbreakGuard(api_key=API_KEY, model=GUARDRAIL_DOC_MODEL)
+    return JailbreakGuard(
+        api_key=API_KEY, model=GUARDRAIL_DOC_MODEL, identity=INTEGRATION_IDENTITY
+    )
 
 
 # A repository file is screened with a framing that must separate two things a

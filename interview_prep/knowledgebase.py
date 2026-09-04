@@ -33,6 +33,7 @@ import yaml
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from .authorization import require_authorized
 from .config import (
     CHUNK_OVERLAP_CHARS,
     CHUNK_SIZE_CHARS,
@@ -148,7 +149,13 @@ def _tags_line(tags: dict) -> str:
 class KnowledgeBase:
     """SQLite-backed knowledge base with per-model cached embeddings."""
 
-    def __init__(self, db_path, api_key, embeddings_factory=None):
+    def __init__(self, db_path, api_key, embeddings_factory=None, identity=None):
+        # Spends the operator's credit (R21.10, ADR-0200). Guarded here rather
+        # than in the caller because `evals/`, `tests/` and any future script
+        # reach this constructor without passing through the page. Only when
+        # the *real* client is built: an injected fake spends nothing.
+        if embeddings_factory is None:
+            require_authorized(identity, "KnowledgeBase")
         self._api_key = api_key
         # Allow an injected factory (tests); otherwise embed via OpenRouter,
         # same client settings as DocumentIndex.

@@ -16,6 +16,11 @@ htmlcov/
 
 # Local secrets
 .env
+# Streamlit secrets hold the live OIDC client secret and the cookie signing
+# key that authenticates every session (§ 21). The `.example` template is
+# placeholders only and is meant to be committed; the real file never is.
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
 
 # Derived data — the knowledge-base DB is rebuilt from knowledgebase/ seeds
 data/

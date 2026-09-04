@@ -245,7 +245,7 @@ def record_warning(name, kind, reason=""):
     st.session_state["flash_warnings"].append(warning_message(entry))
 
 
-def sync_documents(api_key, container) -> DocumentIndex:
+def sync_documents(api_key, container, identity) -> DocumentIndex:
     """Render the document widgets into ``container`` and sync the vector index.
 
     Handles the three session-level document events: an embedding-model switch
@@ -278,7 +278,11 @@ def sync_documents(api_key, container) -> DocumentIndex:
     embedding_model = st.session_state["embedding_model"]
     index = st.session_state.get("doc_index")
     if index is None or index.embedding_model != embedding_model:
-        index = DocumentIndex(api_key=api_key, embedding_model=embedding_model)
+        index = DocumentIndex(
+            api_key=api_key,
+            embedding_model=embedding_model,
+            identity=identity,
+        )
         if docs:
             with st.spinner("Re-embedding documents with the new model…"):
                 for doc in docs:
@@ -306,7 +310,9 @@ def sync_documents(api_key, container) -> DocumentIndex:
         if guard is None:
             # Documents get the mid-size scan model — off the latency-critical
             # path, and reliable at much bigger windows than the chat-turn nano.
-            guard = JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL)
+            guard = JailbreakGuard(
+                api_key=api_key, model=GUARDRAIL_DOC_MODEL, identity=identity
+            )
         with st.spinner(f"Scanning {file.name}…"):
             verdict = guard.check_document(text)
         if not should_ingest(verdict):
@@ -335,7 +341,7 @@ def sync_documents(api_key, container) -> DocumentIndex:
     return index
 
 
-def sync_knowledgebase(api_key):
+def sync_knowledgebase(api_key, identity):
     """Open the persistent knowledge base and reconcile it with the seeds.
 
     The content sync runs once per session; the embedding-coverage sync also
@@ -352,7 +358,9 @@ def sync_knowledgebase(api_key):
         return None
     try:
         if kb is None:
-            kb = KnowledgeBase(db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key)
+            kb = KnowledgeBase(
+                db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key, identity=identity
+            )
         if st.session_state.get("kb_synced_model") != model:
             with st.spinner("Syncing the knowledge base…"):
                 kb.sync(KNOWLEDGEBASE_DIR, model)
@@ -500,8 +508,8 @@ def main() -> None:
 
     # The uploader renders into the interview tab (below the above), then the
     # ingested panel renders right under it.
-    doc_index = sync_documents(api_key, interview_tab)
-    kb = sync_knowledgebase(api_key)
+    doc_index = sync_documents(api_key, interview_tab, identity)
+    kb = sync_knowledgebase(api_key, identity)
     if st.session_state["ingested_docs"] and not library.is_grounding_aware:
         grounding_warning_slot.warning(
             "⚠️ This prompt source is not grounding-aware — uploaded "
@@ -569,7 +577,9 @@ def main() -> None:
         # presentation: the spinners, and writing the result to session state.
         def condense_with_spinner(text, history):
             with st.spinner("Rephrasing your question for search…"):
-                return QueryCondenser(api_key=api_key).condense(text, history)
+                return QueryCondenser(
+                    api_key=api_key, identity=identity
+                ).condense(text, history)
 
         with st.spinner("Retrieving document excerpts…"):
             grounded = ground_turn(
@@ -591,7 +601,7 @@ def main() -> None:
             st.session_state["last_query"] = grounded.query
             st.session_state["last_retrieval"] = grounded.retrieved
 
-        guard = JailbreakGuard(api_key=api_key)
+        guard = JailbreakGuard(api_key=api_key, identity=identity)
         llm = InterviewAgent(
             api_key=api_key,
             model=model,
@@ -651,7 +661,11 @@ def main() -> None:
                         github_mcp = GitHubMCP(pat=pat, specs=cached_specs)
 
                 policy = ContentPolicy(
-                    guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
+                    guard=JailbreakGuard(
+                        api_key=api_key,
+                        model=GUARDRAIL_DOC_MODEL,
+                        identity=identity,
+                    ),
                     index=doc_index,
                     # Raised from inside wrap_tool_call, i.e. off the script
                     # thread — see in_script_thread.
@@ -659,7 +673,7 @@ def main() -> None:
                     on_document=in_script_thread(register_document),
                 )
                 tools = build_tools(
-                    researcher=WebResearcher(api_key=api_key),
+                    researcher=WebResearcher(api_key=api_key, identity=identity),
                     cache=st.session_state["web_research_cache"],
                     mcp=github_mcp,
                 )
