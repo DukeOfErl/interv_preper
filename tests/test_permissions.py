@@ -21,10 +21,8 @@ import pathlib
 import pytest
 
 from interview_prep.permissions import (
-    ROLE_ENV_VAR,
     Permission,
     Role,
-    current_role,
     has,
     resolve_role,
 )
@@ -37,19 +35,6 @@ class Exploding:
         raise RuntimeError("no string for you")
 
     __repr__ = __str__
-
-
-def lookup_returning(value):
-    """A minimal identity port: records what it was asked for, answers once."""
-
-    calls = []
-
-    def lookup(key):
-        calls.append(key)
-        return value
-
-    lookup.calls = calls
-    return lookup
 
 
 # --- resolve_role: turning an untrusted string into a role -------------------
@@ -170,35 +155,17 @@ def test_has_refuses_arguments_that_are_not_roles_and_permissions(role, permissi
     assert has(role, permission) is False
 
 
-# --- current_role: the identity port ----------------------------------------
-
-
-def test_the_port_reads_the_role_from_its_lookup():
-    assert current_role(lookup_returning("dev")) is Role.DEV
-
-
-def test_the_port_consults_the_documented_key():
-    lookup = lookup_returning("dev")
-    current_role(lookup)
-    assert lookup.calls == [ROLE_ENV_VAR]
-
-
-def test_a_lookup_that_returns_nothing_is_a_user():
-    assert current_role(lookup_returning(None)) is Role.USER
-
-
-def test_a_lookup_that_raises_is_a_user():
-    # A missing secrets file or an unconfigured backend must not grant DEV,
-    # and must not take the app down either.
-    def exploding_lookup(key):
-        raise KeyError(key)
-
-    assert current_role(exploding_lookup) is Role.USER
-
-
-def test_a_lookup_returning_an_unknown_value_is_a_user():
-    assert current_role(lookup_returning("superuser")) is Role.USER
-
+# --- the identity port moved (R21.13) ---------------------------------------
+#
+# `current_role(lookup)` and `ROLE_ENV_VAR` used to live here and were tested
+# in this section. WP2 replaced them: the port's implementation is now the
+# authenticated session, its adapter is `chat_bot.current_identity`, and the
+# decision it makes is tested in `tests/test_authorization.py` (the allowlist)
+# and `tests/test_chat_bot_wiring.py` (the wiring).
+#
+# The old route was deleted rather than kept alongside the new one. A function
+# that reaches a `Role` without consulting the allowlist is a second caller
+# waiting to happen, and this file would have gone on certifying that it works.
 
 # --- the architectural rule (R20.4), asserted mechanically -------------------
 

@@ -11,16 +11,39 @@ any release; `1.0.0` when it stabilizes.
 ## [Unreleased]
 
 ### Added
-- **Roles.** The sidebar's **Developer** and **Warnings** tabs are now shown
-  only to a `dev` role, set server-side via `INTERVIEW_PREP_ROLE` in the
-  environment or Streamlit secrets (see `.env.example`); everyone else sees
-  Interview and Evaluations. Warnings you can act on — a rejected upload, a
-  retrieval fallback, an unverified reference — still appear in the chat
-  itself for every role. This is configuration, not login: there is **no
-  authentication yet**, so a deployment is only as private as its URL
-  (ADR-0190).
+- **Sign-in is required, and signing in is not enough.** Authentication is
+  Streamlit's native OIDC (`st.login` / `st.user` / `st.logout`, requiring
+  the new `Authlib` dependency), configured through an `[auth]` block in
+  `.streamlit/secrets.toml`. An unauthenticated visitor gets a sign-in page
+  and nothing else — no chat box, no uploader, no turn. The email the app
+  trusts is the provider's **verified** claim, and an expired token is logged
+  out on the next run (ADR-0200).
+- **An explicit allowlist decides who is served.** A separate `[roles]` table
+  in the same secrets file maps authorized email → role (`dev` or `user`):
+  presence is authorization, **absence is refusal**. Signing in with Google
+  proves an address and nothing more, while every turn spends the operator's
+  own OpenRouter credit — so a valid login that is not on the list is refused,
+  told which account it used, and offered sign-out. A typo'd role name keeps
+  access and loses privilege, but an absent or unreadable table authorizes
+  **nobody, the operator included** — deliberately, because the alternative is
+  a deployment that quietly admits the world to a funded API key. **Operators
+  must configure both blocks before the app serves anyone**; see
+  `.streamlit/secrets.toml.example` and the README (ADR-0200).
+- **The refusal is enforced where the money is spent**, not only on the page:
+  all six paid clients — the agent, the guardrail, the query condenser, the
+  web researcher and the two embedding sites — require an authorized identity
+  to be handed to them and raise rather than call a model without one
+  (ADR-0200).
+- **Roles.** The sidebar's **Developer** and **Warnings** tabs are shown only
+  to a `dev` role, taken from the allowlist above; everyone else sees Interview
+  and Evaluations. Warnings you can act on — a rejected upload, a retrieval
+  fallback, an unverified reference — still appear in the chat itself for every
+  role (ADR-0190).
 
 ### Changed
+- **A deployment is no longer as private as its URL.** The earlier statement
+  that this app has no authentication is withdrawn: access now requires a
+  Google sign-in **and** an entry in the operator's allowlist.
 - The interviewer's turn now runs on **LangChain's agent** rather than a
   hand-rolled tool loop (ADR-0170). Same tools, same budget, same safeguards —
   but tool progress ("Checking GitHub: …") is now reliable, where it could
@@ -35,6 +58,11 @@ any release; `1.0.0` when it stabilizes.
   assistant slot shows *Reasoning with low/medium/high effort…* (or *Waiting
   for the model's reply…* for non-reasoning models) until the first token
   arrives.
+
+### Removed
+- **`INTERVIEW_PREP_ROLE` is gone**, along with the environment/secrets lookup
+  behind it. It was configuration standing in for authentication; the `[roles]`
+  allowlist replaces it. Setting the old variable now does nothing at all.
 
 ## [0.2.0] - 2026-08-04
 

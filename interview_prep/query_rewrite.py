@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from openai import OpenAI
 
+from .authorization import require_authorized
 from .config import (
     OPENROUTER_BASE_URL,
     PROMPTS_DIR,
@@ -64,11 +65,18 @@ class QueryCondenser:
         instructions=None,
         base_url=OPENROUTER_BASE_URL,
         client=None,
+        identity=None,
     ):
         self.model = model
         self.instructions = (
             instructions if instructions is not None else load_query_rewrite_prompt()
         )
+        # Spends the operator's credit (R21.10, ADR-0200). Guarded here rather
+        # than in the caller because `evals/`, `tests/` and any future script
+        # reach this constructor without passing through the page. Only when
+        # the *real* client is built: an injected fake spends nothing.
+        if client is None:
+            require_authorized(identity, f"{type(self).__name__}")
         # Allow an injected client (tests); otherwise build the real one.
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
 

@@ -26,7 +26,6 @@ from interview_prep.config import (
     REASONING_EFFORTS,
     load_api_key,
     load_github_pat,
-    load_role,
 )
 from interview_prep.context import (
     compute_context_usage,
@@ -59,7 +58,8 @@ from interview_prep.prompts import (
 )
 from interview_prep.query_rewrite import QueryCondenser
 from interview_prep.retrieval import DocumentIndex
-from interview_prep.permissions import Permission, current_role, has
+from interview_prep.authorization import ANONYMOUS, authorize
+from interview_prep.permissions import Permission, has
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
@@ -85,24 +85,177 @@ from interview_prep.ui import (
 )
 
 
-def role_lookup(key):
-    """The identity port's one implementation (R20.7): server-side config only.
+ROLE_TABLE_KEY = "roles"
 
-    Streamlit secrets first (how a Cloud deployment sets it), then the
-    environment (how a local `.env` does). Deliberately *not* the query string
-    or session state — per R20.8 anything the browser can influence is not an
-    identity. `st.secrets` raises when no secrets file exists, which is the
-    normal local case, so absence is not an error.
+
+def role_table():
+    """The operator's allowlist: authorized email -> role name (R21.7).
+
+    Read from Streamlit secrets, which is where a Cloud deployment sets it and
+    where a local `.streamlit/secrets.toml` sets it too. Absence is not an
+    error here — it is a refusal, decided by `authorize` rather than by this
+    reader, so that "no table" and "table that authorizes nobody" take exactly
+    the same path (R21.10).
     """
     try:
-        from_secrets = st.secrets.get(key)
+        return st.secrets[ROLE_TABLE_KEY]
     except Exception:
-        from_secrets = None
-    # `load_role` loads the .env itself rather than relying on `load_api_key`
-    # having run earlier in `main` — otherwise the documented .env path breaks
-    # silently (and fails closed, so it reads as "my tabs vanished") the moment
-    # this call moves above the key block.
-    return from_secrets or load_role()
+        return None
+
+
+def user_claim(user, name):
+    """One claim off `st.user`, whichever access shape it presents."""
+    try:
+        if hasattr(user, "get"):
+            return user.get(name)
+        return getattr(user, name, None)
+    except Exception:
+        return None
+
+
+def signed_in(user):
+    """Whether Streamlit has an authenticated session for this browser (R21.2).
+
+    Separate from *authorized* on purpose, and the gate needs both: a visitor
+    who is not signed in must be sent to `st.login()`, while one who is signed
+    in but refused must not be — `st.login()` redirects unconditionally, so
+    sending an already-authenticated user there loops forever instead of
+    showing a message.
+
+    This deliberately does **not** re-check the ID token's `exp` claim, and an
+    earlier version's doing so was a category error worth recording. An ID
+    token is not a session: it is a one-time signed assertion that the person
+    proved their identity at `iat`, and `exp` bounds how long a relying party
+    should accept it *as proof of a fresh login*. The standard flow — which
+    Streamlit already implements — verifies it once at the OAuth callback and
+    then mints its own session, `_streamlit_user`, a signed cookie with
+    `Max-Age` of 30 days. `st.user` reads that cookie once at session start, so
+    `exp` is frozen at login and never refreshes. Re-checking it every run
+    therefore converted Google's ~1-hour token lifetime into a hard 1-hour cap
+    that dropped a candidate's transcript, documents and evaluations mid-
+    interview, which no service behaves like.
+
+    What that check was reaching for is revocation, and `role_table()` already
+    provides it, immediately and better: the allowlist is re-read from secrets
+    on *every* run (R21.7, R20.9), so removing an address locks that person out
+    on their next message regardless of any cookie. Accepted trade-off: a
+    stolen browser session authenticates for up to 30 days without touching
+    Google. Bounding that needs an absolute session age from `iat`, a
+    deliberate policy rather than a side effect of a token lifetime, and is
+    deferred (R21.20).
+    """
+    return bool(getattr(user, "is_logged_in", False))
+
+
+def current_identity():
+    """The identity port's adapter (R21.15) — one seam, now a real one.
+
+    Reads the authenticated session rather than an environment variable. The
+    port's shape is unchanged, which is the whole point of having had one:
+    everything downstream still asks a pure function a question.
+
+    Deliberately *not* consulted: the query string and `session_state`. R20.8
+    still holds — anything the browser can influence is not an identity, and
+    that is more true now that the answer decides who spends the operator's
+    money.
+    """
+    user = getattr(st, "user", None)
+    if not signed_in(user):
+        return ANONYMOUS
+    # `email_verified` is required, not decorative (R21.3). Without it the
+    # allowlist checks an address the signer never confirmed, and on any IdP
+    # that lets a user self-assert one at registration a stranger can be
+    # issued a validly signed token *as* an allowlisted person. Normalising the
+    # provider's spelling of the claim is this adapter's job; `authorize`
+    # demands the decided boolean and will not guess.
+    return authorize(
+        user_claim(user, "email"),
+        table=role_table(),
+        email_verified=user_claim(user, "email_verified") is True,
+    )
+
+
+def sign_in() -> None:
+    """Start the OIDC flow. Only ever from a click — never from a script run."""
+    try:
+        st.login()
+    except Exception as exc:
+        # A missing `[auth]` block or an absent Authlib is a deployment fault,
+        # not a user error, and saying so beats an unexplained traceback.
+        st.session_state["sign_in_error"] = str(exc)
+
+
+def render_sign_in() -> None:
+    """The whole app, for a visitor who has not signed in (R21.2).
+
+    `st.login()` is behind a button, and must stay there. Calling it in the
+    script body — as the first version did — redirects on every anonymous run,
+    which breaks three things at once:
+
+    * **Sign-out cannot work.** `st.logout()` enqueues a redirect to
+      `/auth/logout`, the same run then falls through to here and enqueues a
+      second redirect to `/auth/login`, and the browser applies the last one.
+      The provider still holds its own session, so the person is signed
+      straight back in. The Sign-out button that R21.21 exists for was
+      unusable, on this page and on the not-authorized page both.
+    * **The copy below is never read**, because the page navigates away before
+      it paints.
+    * **Cancelling at the provider loops.** The bounce back to `/` immediately
+      redirects to the provider again, with no state in which to stop.
+
+    Streamlit's own documented pattern puts `st.login()` behind a widget for
+    exactly this reason. Found by the WP2 code-review, not by the tests: the
+    sign-out test stubs `st.logout` with a no-op, so the follow-on rerun never
+    reached this function.
+    """
+    st.title("Interview Prep")
+    st.write(
+        "This app runs mock job interviews. Sign in to continue — access is "
+        "limited to accounts the operator has authorized."
+    )
+    st.button("Sign in with Google", type="primary", on_click=sign_in)
+    error = st.session_state.get("sign_in_error")
+    if error:
+        st.error(
+            "Sign-in is not configured on this deployment, so it cannot be "
+            f"used yet. ({error})"
+        )
+
+
+def render_not_authorized(identity) -> None:
+    """R21.13: refused, told why, told which account, offered a way out.
+
+    Two refusals with different causes and different fixers, so they get
+    different words. "Not on the allowlist" is for the operator to fix in
+    secrets. "Provider did not assert verification" cannot be fixed there at
+    all — the allowlist is working correctly and the provider is the problem —
+    and the first version of this page sent the operator to edit `[roles]`
+    anyway, where nothing they did would help.
+    """
+    st.title("Not authorized")
+    if getattr(identity, "refusal", None) == "unverified":
+        st.write(
+            "You are signed in, but the identity provider did not confirm that "
+            "this address is verified, so it cannot be matched against the "
+            "authorized list. **This is a deployment setting, not a problem "
+            "with your account** — adding the address to the list will not "
+            "change it."
+        )
+        st.caption(
+            "This app requires the `email_verified` claim, because an "
+            "unverified address proves nothing about who owns it. Google "
+            "provides it; some providers (Microsoft Entra ID among them) do "
+            "not send it at all."
+        )
+    else:
+        st.write(
+            "You are signed in, but this account is not on the authorized list "
+            "for this app. If you believe it should be, ask the operator to add "
+            "the address below."
+        )
+    st.code(identity.email or "(no email address on this account)")
+    st.write("Signed in with the wrong account? Sign out and try another.")
+    st.button("Sign out", on_click=st.logout)
 
 
 def in_script_thread(callback):
@@ -148,7 +301,7 @@ def record_warning(name, kind, reason=""):
     st.session_state["flash_warnings"].append(warning_message(entry))
 
 
-def sync_documents(api_key, container) -> DocumentIndex:
+def sync_documents(api_key, container, identity) -> DocumentIndex:
     """Render the document widgets into ``container`` and sync the vector index.
 
     Handles the three session-level document events: an embedding-model switch
@@ -181,7 +334,11 @@ def sync_documents(api_key, container) -> DocumentIndex:
     embedding_model = st.session_state["embedding_model"]
     index = st.session_state.get("doc_index")
     if index is None or index.embedding_model != embedding_model:
-        index = DocumentIndex(api_key=api_key, embedding_model=embedding_model)
+        index = DocumentIndex(
+            api_key=api_key,
+            embedding_model=embedding_model,
+            identity=identity,
+        )
         if docs:
             with st.spinner("Re-embedding documents with the new model…"):
                 for doc in docs:
@@ -209,7 +366,9 @@ def sync_documents(api_key, container) -> DocumentIndex:
         if guard is None:
             # Documents get the mid-size scan model — off the latency-critical
             # path, and reliable at much bigger windows than the chat-turn nano.
-            guard = JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL)
+            guard = JailbreakGuard(
+                api_key=api_key, model=GUARDRAIL_DOC_MODEL, identity=identity
+            )
         with st.spinner(f"Scanning {file.name}…"):
             verdict = guard.check_document(text)
         if not should_ingest(verdict):
@@ -238,7 +397,7 @@ def sync_documents(api_key, container) -> DocumentIndex:
     return index
 
 
-def sync_knowledgebase(api_key):
+def sync_knowledgebase(api_key, identity):
     """Open the persistent knowledge base and reconcile it with the seeds.
 
     The content sync runs once per session; the embedding-coverage sync also
@@ -255,7 +414,9 @@ def sync_knowledgebase(api_key):
         return None
     try:
         if kb is None:
-            kb = KnowledgeBase(db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key)
+            kb = KnowledgeBase(
+                db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key, identity=identity
+            )
         if st.session_state.get("kb_synced_model") != model:
             with st.spinner("Syncing the knowledge base…"):
                 kb.sync(KNOWLEDGEBASE_DIR, model)
@@ -269,6 +430,24 @@ def sync_knowledgebase(api_key):
 
 
 def main() -> None:
+    # Authentication and authorization first, before a key is even read
+    # (R21.2, R21.11). Every turn spends the operator's own credit, so an
+    # unauthorized visitor must not reach a model selector, an uploader, or a
+    # chat box — and `st.stop()` here means they reach none of them. The agent
+    # refuses independently (R21.12); this exists so the refusal is legible,
+    # not so it is enforced.
+    identity = current_identity()
+    if not signed_in(getattr(st, "user", None)):
+        render_sign_in()
+        st.stop()
+    if not identity.is_authorized:
+        # Signed in and refused — including a session with no email claim at
+        # all, which `render_not_authorized` says so. Deliberately not the
+        # sign-in page: that redirects, and redirecting an authenticated
+        # visitor loops forever.
+        render_not_authorized(identity)
+        st.stop()
+
     # Prefer a key from the environment/.env; otherwise let the user paste one
     # into the sidebar (kept in session only). Fail fast until we have a key.
     env_key = load_api_key()
@@ -326,7 +505,27 @@ def main() -> None:
     # here needs a real guard it belongs in the operation, per R20.5. The
     # warnings a user can act on still flash in the chat body either way
     # (R20.6).
-    show_diagnostics = has(current_role(role_lookup), Permission.VIEW_DIAGNOSTICS)
+    # Who you are, before what you can do — account chrome sits at the top of
+    # the sidebar, above the tabs, so it is the first thing visible and stays
+    # visible whichever tab is open. Not in the main window: that is the
+    # interview, and this would cost it vertical space permanently.
+    #
+    # One row, not three stacked elements. Stacked (caption, button, divider)
+    # it pushed the tabs far enough down that the sidebar needed scrolling
+    # before showing anything the person came for — chrome earning more space
+    # than the content. The divider is gone for the same reason: its margins
+    # cost more than the separation was worth.
+    #
+    # Sign-out belongs to being signed in, not to holding a permission
+    # (R21.21): every authorized identity gets it, dev and user alike. The
+    # address stays visible rather than hidden behind the button, because a
+    # sign-out control with no account name is a coin flip once more than one
+    # account is in play.
+    account, action = st.sidebar.columns([2, 1], vertical_alignment="center")
+    account.caption(f"{identity.email}")
+    action.button("Sign out", on_click=st.logout, use_container_width=True)
+
+    show_diagnostics = has(identity.role, Permission.VIEW_DIAGNOSTICS)
     tab_labels = ["Interview", "Evaluations"]
     if show_diagnostics:
         tab_labels += ["Developer", "Warnings"]
@@ -385,8 +584,8 @@ def main() -> None:
 
     # The uploader renders into the interview tab (below the above), then the
     # ingested panel renders right under it.
-    doc_index = sync_documents(api_key, interview_tab)
-    kb = sync_knowledgebase(api_key)
+    doc_index = sync_documents(api_key, interview_tab, identity)
+    kb = sync_knowledgebase(api_key, identity)
     if st.session_state["ingested_docs"] and not library.is_grounding_aware:
         grounding_warning_slot.warning(
             "⚠️ This prompt source is not grounding-aware — uploaded "
@@ -454,7 +653,9 @@ def main() -> None:
         # presentation: the spinners, and writing the result to session state.
         def condense_with_spinner(text, history):
             with st.spinner("Rephrasing your question for search…"):
-                return QueryCondenser(api_key=api_key).condense(text, history)
+                return QueryCondenser(
+                    api_key=api_key, identity=identity
+                ).condense(text, history)
 
         with st.spinner("Retrieving document excerpts…"):
             grounded = ground_turn(
@@ -476,9 +677,12 @@ def main() -> None:
             st.session_state["last_query"] = grounded.query
             st.session_state["last_retrieval"] = grounded.retrieved
 
-        guard = JailbreakGuard(api_key=api_key)
+        guard = JailbreakGuard(api_key=api_key, identity=identity)
         llm = InterviewAgent(
-            api_key=api_key, model=model, reasoning_effort=reasoning_effort
+            api_key=api_key,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            identity=identity,
         )
         pending = messages + [{"role": "user", "content": prompt}]
         reply_parts = []
@@ -533,7 +737,11 @@ def main() -> None:
                         github_mcp = GitHubMCP(pat=pat, specs=cached_specs)
 
                 policy = ContentPolicy(
-                    guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
+                    guard=JailbreakGuard(
+                        api_key=api_key,
+                        model=GUARDRAIL_DOC_MODEL,
+                        identity=identity,
+                    ),
                     index=doc_index,
                     # Raised from inside wrap_tool_call, i.e. off the script
                     # thread — see in_script_thread.
@@ -541,7 +749,7 @@ def main() -> None:
                     on_document=in_script_thread(register_document),
                 )
                 tools = build_tools(
-                    researcher=WebResearcher(api_key=api_key),
+                    researcher=WebResearcher(api_key=api_key, identity=identity),
                     cache=st.session_state["web_research_cache"],
                     mcp=github_mcp,
                 )

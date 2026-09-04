@@ -27,6 +27,10 @@ from langchain.agents.middleware import (
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
+# `Unauthorized` is re-exported: it is raised by six clients, so it lives in
+# the pure module rather than here, but callers still import it from the
+# agent they were refused by.
+from .authorization import Identity, Unauthorized, require_authorized  # noqa: F401
 from .config import OPENROUTER_BASE_URL, TYPING_DELAY_SECONDS
 from .middleware import (
     TOOL_CALL_BUDGET,
@@ -64,8 +68,15 @@ class InterviewAgent:
         base_url=OPENROUTER_BASE_URL,
         typing_delay=TYPING_DELAY_SECONDS,
         chat_model=None,
+        identity=None,
     ):
         self.model = model
+        # The proof of authorization (R21.13). Kept as given rather than
+        # coerced: `stream_reply` refuses anything that is not an `Identity`
+        # saying it is authorized, so a truthy stand-in cannot be mistaken for
+        # one. Defaults to None so a caller that never heard of authorization
+        # fails closed instead of spending.
+        self.identity = identity
         self.reasoning_effort = reasoning_effort
         self.typing_delay = typing_delay
         extra_body = {"usage": {"include": True}}
@@ -116,6 +127,16 @@ class InterviewAgent:
             ),
         ]
 
+    def _require_authorized(self):
+        """Refuse a turn without an authorized identity (R21.12, R21.13).
+
+        Delegates to the shared guard so the wording and the `isinstance` rule
+        are identical across all six paid clients. Unlike the other five, this
+        one fires on the *turn* rather than in `__init__`: constructing an
+        agent costs nothing, `create_agent` and the stream are what spend.
+        """
+        require_authorized(self.identity, "this turn")
+
     def stream_reply(
         self,
         system_prompt,
@@ -132,7 +153,37 @@ class InterviewAgent:
 
         ``on_progress`` is called from *this* thread as the stream is consumed,
         so a Streamlit caller can paint into its own slot safely.
+
+        Not itself a generator: the authorization check has to run when this is
+        *called*, not when the first token is pulled. Otherwise a caller that
+        builds the stream and abandons it would appear guarded while only a
+        caller that iterates is actually checked.
         """
+        self._require_authorized()
+        return self._stream_reply(
+            system_prompt,
+            messages,
+            tools=tools,
+            policy=policy,
+            mcp_names=mcp_names,
+            seen_terms=seen_terms,
+            code_corpus=code_corpus,
+            on_warning=on_warning,
+            on_progress=on_progress,
+        )
+
+    def _stream_reply(
+        self,
+        system_prompt,
+        messages,
+        tools=(),
+        policy=None,
+        mcp_names=(),
+        seen_terms=None,
+        code_corpus=None,
+        on_warning=None,
+        on_progress=None,
+    ):
         self._reset()
         agent = create_agent(
             model=self._chat_model,

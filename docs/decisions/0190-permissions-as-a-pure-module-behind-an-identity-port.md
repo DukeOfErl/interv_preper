@@ -73,6 +73,15 @@ their own work packages (R20.12–R20.14), each with its own ADR.
 
 ## Trade-off accepted
 
+> **Superseded on this point by [ADR-0200](0200-authentication-is-oidc-plus-an-explicit-allowlist.md).**
+> The paragraph below described the state while the environment-variable
+> override was the only identity source. WP2 replaced it: access now requires a
+> Google sign-in **and** an entry in the operator's allowlist, and the override
+> (`INTERVIEW_PREP_ROLE`, `current_role`, `load_role`) was deleted. R21.17
+> requires the withdrawn statement to carry this pointer rather than stand
+> unqualified — an ADR is a dated record of a decision, so the text is kept
+> rather than rewritten, but a reader landing here must not take it as current.
+
 **There is no authentication.** With the override as the only identity source,
 the role is configuration and the deployment is exactly as private as its URL.
 Anyone who reaches the app is a `user`; nobody can become a `dev` without

@@ -1,5 +1,16 @@
 """The role/permission model: a pure function of (role, permission).
 
+Roles grade what an **authorized** identity may do. Whether there is an
+authorized identity at all is `authorization.py`'s question (R21.12) — the two
+fail in opposite directions, so they are decided separately.
+
+This module used to also carry the identity port (`current_role`, reading an
+environment variable). WP2 replaced that with real authentication, and the
+port's adapter now lives in `chat_bot.current_identity`. The old route was
+removed rather than left in place: a role resolver that reaches a `Role`
+without consulting the allowlist is exactly the second caller this project's
+guard rule warns about.
+
 Per ADR-0190, this is what a spend cap or a capability check would have to
 hold in `chat_bot.py` alone — but the app has three callers (`chat_bot.py`,
 `evals/`, `tests/`), and only one of them is the page. Living here, free of
@@ -17,12 +28,6 @@ produces nothing at all.
 from __future__ import annotations
 
 from enum import Enum, auto
-
-# The documented key an identity port is asked for. One seam, one function
-# (`current_role`) — see ADR-0190; a URL parameter or `session_state` key is
-# explicitly not this, per R20.8.
-ROLE_ENV_VAR = "INTERVIEW_PREP_ROLE"
-
 
 class Role(Enum):
     USER = auto()
@@ -64,17 +69,3 @@ def has(role, permission) -> bool:
     if not isinstance(role, Role) or not isinstance(permission, Permission):
         return False
     return permission in _GRANTS.get(role, set())
-
-
-def current_role(lookup) -> Role:
-    """Resolve the current role from an identity port, on each call.
-
-    `lookup` is a single-argument callable — an environment or Streamlit
-    secrets read — asked for `ROLE_ENV_VAR`. Any failure, or a value the port
-    cannot answer, resolves to `Role.USER`.
-    """
-    try:
-        raw = lookup(ROLE_ENV_VAR)
-    except Exception:
-        return Role.USER
-    return resolve_role(raw)
