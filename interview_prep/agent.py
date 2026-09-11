@@ -113,6 +113,14 @@ class InterviewAgent:
     def _reset(self):
         self.last_usage = None
         self.last_cost = None
+        #: Tokens from hops that billed but reported no cost of their own.
+        #: A turn is one model call per hop and each bills separately, so a
+        #: turn where *some* hops report a cost and others do not is the
+        #: under-counting case: taking `last_cost` alone silently prices the
+        #: rest at nothing. Kept apart from `last_usage`, which holds only the
+        #: final hop, so these can be priced and added rather than replaced.
+        self._unpriced_prompt_tokens = 0
+        self._unpriced_completion_tokens = 0
         #: What this turn cost, down R22.3's ladder — the figure recorded
         #: against the ledger and displayed by the page. None until a turn ends.
         self.turn_cost_usd = None
@@ -275,11 +283,21 @@ class InterviewAgent:
         round trip, and dozens of tests drive this agent with a scripted model
         that never spends a cent.
         """
-        if self.last_cost is not None:
+        unpriced = self._unpriced_prompt_tokens or self._unpriced_completion_tokens
+        if self.last_cost is not None and not unpriced:
             return self.last_cost
         if not self.budget.counts:
-            return None
+            return self.last_cost
         pricing = price_of(self.model, self._api_key)
+        if self.last_cost is not None:
+            # Some hops reported, some did not. Charge what was reported and
+            # price the rest from their own tokens (R22.3's second rung),
+            # rather than letting the reported figure stand for the whole turn.
+            return self.last_cost + turn_cost(
+                pricing,
+                self._unpriced_prompt_tokens,
+                self._unpriced_completion_tokens,
+            )
         if self.last_usage is not None:
             return turn_cost(
                 pricing,
@@ -341,6 +359,15 @@ class InterviewAgent:
         cost = token_usage.get("cost")
         if cost is not None:
             self.last_cost = (self.last_cost or 0.0) + cost
+        elif usage:
+            # This hop billed and said nothing about what it cost. Its tokens
+            # are remembered separately so `_turn_cost` can price them and add
+            # them to the hops that did report — rather than the ladder seeing
+            # a non-None `last_cost` and stopping on the first rung, which
+            # charges a multi-hop turn for whichever hops happened to be
+            # chatty about their billing.
+            self._unpriced_prompt_tokens += usage.get("input_tokens") or 0
+            self._unpriced_completion_tokens += usage.get("output_tokens") or 0
 
     @property
     def extra_cost(self):

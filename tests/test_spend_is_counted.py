@@ -36,7 +36,7 @@ from interview_prep.guardrails import JailbreakGuard
 from interview_prep.ingest import IngestedDocument
 from interview_prep.knowledgebase import KnowledgeBase
 from interview_prep.permissions import Role
-from interview_prep.pricing import embedding_cost
+from interview_prep.pricing import ModelPricing, embedding_cost
 from interview_prep.query_rewrite import QueryCondenser
 from interview_prep.retrieval import DocumentIndex
 from interview_prep.spend import (
@@ -560,3 +560,72 @@ def test_an_unpriced_model_costs_nothing_rather_than_raising(monkeypatch):
         "interview_prep.pricing.fetch_model_endpoints", lambda model_id, api_key: []
     )
     assert embedding_cost(["c" * 400], "model-nobody-prices", "k") == 0.0
+
+
+# --- a multi-hop turn where only some hops report their cost ----------------
+
+
+def test_hops_that_report_no_cost_are_priced_rather_than_billed_at_nothing(
+    monkeypatch,
+):
+    """Found by review, and invisible to every single-hop test.
+
+    A turn is one model call per hop and each bills separately. OpenRouter
+    reports a `cost` for some responses and not others, so a multi-hop tool
+    turn can arrive with hop one priced and hop two silent. The ladder used to
+    stop on its first rung whenever *any* cost was reported —
+    `if self.last_cost is not None: return self.last_cost` — which charges the
+    turn for whichever hops happened to be chatty about their billing and
+    prices the rest at zero.
+
+    Driven through the accounting directly rather than through the graph: the
+    defect is in how the rungs combine, and a scripted two-reply model ends
+    the turn after the first hop unless it calls a tool, so the graph route
+    cannot reach the case at all.
+
+    Under-counting is the expensive direction. Nothing errors, the sidebar
+    looks plausible, and the cap is decided against a total that is too low.
+    """
+    monkeypatch.setattr(
+        "interview_prep.agent.price_of",
+        # Rates are USD per *token*, so 1e-6 makes a million tokens cost $1.
+        lambda model, api_key: ModelPricing(
+            model="m",
+            prompt_price=1e-6,
+            completion_price=1e-6,
+            source="OpenRouter",
+        ),
+    )
+    paid, _ = budget()
+    agent = InterviewAgent(
+        api_key="k",
+        model="m",
+        chat_model=ScriptedModel(replies=[]),
+        identity=IDENTITY,
+        budget=paid,
+    )
+    agent._reset()
+
+    # Hop one reports its cost and no tokens.
+    agent._record_usage(
+        SimpleNamespace(
+            usage_metadata=None, response_metadata={"token_usage": {"cost": 0.01}}
+        )
+    )
+    # Hop two bills, reports tokens, and reports no cost.
+    agent._record_usage(
+        SimpleNamespace(
+            usage_metadata={
+                "input_tokens": 1_000_000,
+                "output_tokens": 1_000_000,
+                "total_tokens": 2_000_000,
+            },
+            response_metadata={},
+        )
+    )
+
+    cost = agent._turn_cost("sys", [{"role": "user", "content": "go"}])
+    # A dollar per million tokens each way makes hop two $2.00, on top of hop
+    # one's reported cent. The old behaviour returned exactly 0.01.
+    assert cost > 0.01, "the unreported hop was billed at nothing"
+    assert cost == pytest.approx(2.01, rel=1e-3)
