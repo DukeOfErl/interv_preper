@@ -46,3 +46,6 @@ data/
 
 # Local-only developer files (fixtures, scratch, notes) — never committed
 dev_local/
+
+# Harness-comparison arm worktrees (docs/experiments/harness-comparison)
+.worktrees/

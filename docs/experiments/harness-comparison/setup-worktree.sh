@@ -9,7 +9,11 @@ set -euo pipefail
 
 ARM="${1:?usage: setup-worktree.sh <arm-name>   (e.g. arm-b-workflow)}"
 ROOT="$(git rev-parse --show-toplevel)"
-DEST="${ROOT}/../interv_preper-${ARM}"
+# Inside the repo, under a gitignored .worktrees/, rather than as a sibling
+# directory: the agent sandbox permits writes within the project directory and
+# refuses them in its parent. The leading dot also keeps pytest from collecting
+# the other arm's tests (its default norecursedirs skips dot-directories).
+DEST="${ROOT}/.worktrees/${ARM}"
 
 # Branch off feat/spend-cap, NOT dev: the brief, REQUIREMENTS section 22,
 # ADR-0210 and the failing tests all live there. A worktree off dev has none
