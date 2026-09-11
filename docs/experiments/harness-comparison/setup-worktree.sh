@@ -11,7 +11,11 @@ ARM="${1:?usage: setup-worktree.sh <arm-name>   (e.g. arm-b-workflow)}"
 ROOT="$(git rev-parse --show-toplevel)"
 DEST="${ROOT}/../interv_preper-${ARM}"
 
-git -C "$ROOT" worktree add -b "wp4/${ARM}" "$DEST" dev
+# Branch off feat/spend-cap, NOT dev: the brief, REQUIREMENTS section 22,
+# ADR-0210 and the failing tests all live there. A worktree off dev has none
+# of them, and the arm would have nothing to implement against.
+BASE="${BASE:-feat/spend-cap}"
+git -C "$ROOT" worktree add -b "wp4/${ARM}" "$DEST" "$BASE"
 
 mkdir -p "${DEST}/.streamlit"
 cp "${ROOT}/.env" "${DEST}/.env"
@@ -22,7 +26,7 @@ cp "${ROOT}/.streamlit/secrets.toml" "${DEST}/.streamlit/secrets.toml"
 # run concurrently, or the totals interleave.
 echo
 echo "Worktree ready:  ${DEST}"
-echo "Branch:          wp4/${ARM}  (off dev)"
+echo "Branch:          wp4/${ARM}  (off ${BASE})"
 echo "Seeded:          .env, .streamlit/secrets.toml"
 echo
 echo "NOTE: both arms write to the same 'spend' table. Do not run them"
