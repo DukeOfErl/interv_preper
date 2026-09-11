@@ -58,7 +58,7 @@ Recorded per arm, into `RESULTS.md`:
 |---|---|
 | Wall-clock | Start to a green suite |
 | Token spend | Session total attributable to the arm |
-| Tests passing unaided | Of the 30 in `tests/test_spend_cap.py`, how many pass with no human correction |
+| Tests passing unaided | Of the 29 in `tests/test_spend_cap.py`, how many pass with no human correction |
 | Requirements met unprompted | Especially R22.2 (all six paid clients) and R22.4 (blocked turns) — the two an arm is most likely to skip while reporting success |
 | Review findings | `/code-review` run identically against each branch |
 | Repair needed | Interventions, and what each was for |
