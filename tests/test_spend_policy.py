@@ -18,15 +18,16 @@ import os
 import pytest
 
 from interview_prep import context
-from interview_prep.authorization import ANONYMOUS, Identity
+from interview_prep.authorization import ANONYMOUS, Identity, normalise_email
 from interview_prep.config import ASSUMED_REPLY_TOKENS, DEFAULT_MODEL, MAX_TOOL_HOPS
 from interview_prep.permissions import Role
 from interview_prep.pricing import price_of, turn_cost
 from interview_prep.spend import (
-    UNMEASURED_TURN_USD,
+    BufferedLedger,
     InMemoryLedger,
     LedgerUnavailable,
     OverBudget,
+    UNMEASURED_TURN_USD,
     check_budget,
     decide,
     require_within_budget,
@@ -211,3 +212,146 @@ def test_the_unmeasured_fallback_still_covers_a_worst_case_turn():
         f"than the ${UNMEASURED_TURN_USD:.4f} fallback covers — an unmeasured "
         "turn would be admitted for less than it costs (R22.7)"
     )
+
+
+# --- BufferedLedger: one read and one write per run -------------------------
+#
+# R22.11 makes the store the authority and says it is read and written every
+# turn. Taken per *operation* that is roughly 550 short-lived pooler
+# connections for a 2 MB document scan — one per classifier window — which a
+# free tier refuses. Because the ledger fails closed (R22.12) that refusal
+# takes the whole app down rather than merely slowing it, so the buffering is
+# a correctness fix wearing a performance costume.
+#
+# The two properties that make buffering safe are asserted here, because both
+# are ways it could be silently wrong: a buffer that hides pending spend from
+# its own reader un-bounds the fan-out R22.7 bounds, and a buffer that drops
+# spend on a failed write under-counts, which is the expensive direction.
+
+
+class CountingLedger:
+    """An in-memory ledger that also counts how often it is touched."""
+
+    def __init__(self, fail_on_record=False):
+        self.totals = {}
+        self.reads = 0
+        self.writes = 0
+        self.fail_on_record = fail_on_record
+
+    def total(self, email):
+        self.reads += 1
+        return self.totals.get(normalise_email(email), 0.0)
+
+    def record(self, email, amount):
+        self.writes += 1
+        if self.fail_on_record:
+            raise LedgerUnavailable("pooler said no")
+        key = normalise_email(email)
+        self.totals[key] = self.totals.get(key, 0.0) + amount
+
+
+def test_the_store_is_read_once_however_often_the_budget_asks():
+    inner = CountingLedger()
+    buffered = BufferedLedger(inner)
+    for _ in range(50):
+        buffered.total("candidate@example.com")
+    assert inner.reads == 1
+
+
+def test_a_buffered_reader_sees_its_own_pending_spend():
+    """The property that keeps a long fan-out bounded.
+
+    A document scan spends once per window inside a single run. If the buffer
+    hid those from its own `total`, every window would be judged against the
+    total as it stood before the upload began, and the cap would not bite until
+    the next turn — which is R22.7's one-turn bound quietly becoming one-upload.
+    """
+    inner = CountingLedger()
+    inner.totals["candidate@example.com"] = 1.00
+    buffered = BufferedLedger(inner)
+    buffered.record("candidate@example.com", 0.25)
+    buffered.record("candidate@example.com", 0.25)
+    assert buffered.total("candidate@example.com") == pytest.approx(1.50)
+
+
+def test_nothing_is_written_until_the_flush():
+    inner = CountingLedger()
+    buffered = BufferedLedger(inner)
+    buffered.record("candidate@example.com", 0.40)
+    assert inner.writes == 0
+    assert inner.total("candidate@example.com") == 0.0
+
+
+def test_the_flush_writes_once_per_identity():
+    inner = CountingLedger()
+    buffered = BufferedLedger(inner)
+    for _ in range(10):
+        buffered.record("candidate@example.com", 0.01)
+    inner.reads = 0
+    assert buffered.flush() is True
+    # One write for ten recordings, and the sum is intact.
+    assert inner.writes == 1
+    assert inner.totals["candidate@example.com"] == pytest.approx(0.10)
+
+
+def test_identities_are_flushed_separately():
+    inner = CountingLedger()
+    buffered = BufferedLedger(inner)
+    buffered.record("one@example.com", 1.00)
+    buffered.record("two@example.com", 2.00)
+    buffered.flush()
+    assert inner.totals["one@example.com"] == pytest.approx(1.00)
+    assert inner.totals["two@example.com"] == pytest.approx(2.00)
+
+
+def test_a_failed_flush_keeps_the_spend_rather_than_losing_it():
+    """Under-counting is the expensive direction, so a failed write retries.
+
+    The other arm of this experiment cleared its accumulator *before* writing,
+    so one transient pooler error erased the turn's spend permanently and the
+    next turn was decided against a total that was quietly too low. Delaying a
+    write is recoverable; dropping it is not.
+    """
+    inner = CountingLedger(fail_on_record=True)
+    buffered = BufferedLedger(inner)
+    buffered.record("candidate@example.com", 0.40)
+    assert buffered.flush() is False
+    assert buffered.pending_total == pytest.approx(0.40)
+
+    # The store comes back; the next flush lands the amount that was held.
+    inner.fail_on_record = False
+    assert buffered.flush() is True
+    assert inner.totals["candidate@example.com"] == pytest.approx(0.40)
+    assert buffered.pending_total == 0.0
+
+
+def test_an_unreachable_store_still_fails_closed_through_the_buffer():
+    """The buffer must not turn an outage into an unlimited budget."""
+
+    class DownLedger:
+        def total(self, email):
+            raise LedgerUnavailable("connection refused")
+
+        def record(self, email, amount):
+            raise LedgerUnavailable("connection refused")
+
+    buffered = BufferedLedger(DownLedger())
+    with pytest.raises(LedgerUnavailable):
+        buffered.total("candidate@example.com")
+
+
+def test_the_buffer_normalises_email_the_way_the_allowlist_does():
+    inner = CountingLedger()
+    buffered = BufferedLedger(inner)
+    buffered.record("Candidate@Example.com", 1.00)
+    buffered.record("  candidate@example.com ", 1.00)
+    buffered.flush()
+    assert inner.totals["candidate@example.com"] == pytest.approx(2.00)
+
+
+def test_recording_zero_costs_no_write():
+    inner = CountingLedger()
+    buffered = BufferedLedger(inner)
+    buffered.record("candidate@example.com", 0.0)
+    assert buffered.flush() is True
+    assert inner.writes == 0

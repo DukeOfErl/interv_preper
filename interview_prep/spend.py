@@ -363,6 +363,83 @@ def refuse_unpriceable(identity, what) -> None:
     )
 
 
+class BufferedLedger:
+    """One read and one write per run, wrapped around a real ledger.
+
+    R22.11 says the store is the source of truth and is read and written every
+    turn. That is a rule about *authority*, not about how many sockets it takes
+    to honour it — and the literal per-operation reading of it is ruinous over
+    a network. Each paid client asks the ledger for a total before it spends
+    and adds to it afterwards, and the guardrail's document scan is one paid
+    classifier call per window: a 2 MB upload measured at roughly 550 calls,
+    and therefore 550 short-lived pooler connections, for one document. A
+    Supabase free tier does not survive that, and the failure mode is the
+    fail-closed one — the app stops serving everybody.
+
+    So this reads through once per run and holds the write until the run ends.
+    Two properties make that safe rather than merely cheaper:
+
+    * **`total` returns what was read plus what is pending**, so a fan-out that
+      spends inside one run still sees its own accumulation and the cap still
+      bites partway through a large upload. Buffering the write must not
+      buffer the *knowledge* of it, or the scan that R22.7 bounds becomes
+      unbounded again.
+    * **A failed flush keeps the pending amount** rather than dropping it. The
+      other arm of this experiment cleared its accumulator before writing, so
+      a transient pooler error silently erased the spend and the next turn was
+      decided against an under-counted total. Under-counting is the expensive
+      direction, and losing the record is worse than delaying it.
+
+    What is given up: a crash between spending and the flush loses that run's
+    spend. The window is one run rather than one operation, and the alternative
+    is an outage. Named here rather than discovered later.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._read = {}
+        self._pending = {}
+
+    def total(self, email) -> float:
+        key = normalise_email(email)
+        if key not in self._read:
+            # Not caught: an unreachable store must reach `check_budget`, which
+            # fails the turn closed (R22.12). Swallowing it here would turn an
+            # outage into an unlimited budget.
+            self._read[key] = self._inner.total(email)
+        return self._read[key] + self._pending.get(key, 0.0)
+
+    def record(self, email, amount) -> None:
+        if not amount:
+            return
+        key = normalise_email(email)
+        self._pending[key] = self._pending.get(key, 0.0) + amount
+
+    def flush(self) -> bool:
+        """Write what is pending. False if any of it did not land."""
+        landed = True
+        for key, amount in list(self._pending.items()):
+            if not amount:
+                del self._pending[key]
+                continue
+            try:
+                self._inner.record(key, amount)
+            except Exception:
+                # Kept, not dropped. Retried at the next flush of this run's
+                # successor, and the store is read again before the next turn
+                # is allowed, so an outage still stops spending within a turn.
+                landed = False
+                continue
+            del self._pending[key]
+            self._read[key] = self._read.get(key, 0.0) + amount
+        return landed
+
+    @property
+    def pending_total(self) -> float:
+        """Unflushed spend across every identity — what a crash would lose."""
+        return sum(self._pending.values())
+
+
 class InMemoryLedger:
     """The port's process-local adapter: durable for exactly as long as a test.
 

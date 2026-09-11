@@ -62,7 +62,13 @@ from interview_prep.retrieval import DocumentIndex
 from interview_prep.authorization import ANONYMOUS, authorize
 from interview_prep.ledger_postgres import PostgresLedger
 from interview_prep.permissions import Permission, has
-from interview_prep.spend import Budget, LedgerUnavailable, OverBudget, check_budget
+from interview_prep.spend import (
+    BufferedLedger,
+    Budget,
+    LedgerUnavailable,
+    OverBudget,
+    check_budget,
+)
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
@@ -90,6 +96,8 @@ from interview_prep.ui import (
 
 ROLE_TABLE_KEY = "roles"
 SPEND_KEY = "spend"
+#: Where this run's `BufferedLedger` waits for `main`'s flush.
+SPEND_BUFFER_KEY = "_spend_buffer"
 
 
 class MissingLedger:
@@ -134,17 +142,28 @@ def current_budget(estimate):
     """
     settings = spend_settings()
     try:
-        ledger = PostgresLedger(settings["connection_string"])
+        store = PostgresLedger(settings["connection_string"])
     except Exception:
         # Absent, unreadable, or missing its connection string — all the same
         # fact to a user, and all fail closed.
-        return Budget(ledger=MissingLedger(), cap=0.0, estimate=estimate)
-    try:
-        cap = float(settings["cap_usd"])
-    except Exception:
-        # A cap that cannot be read is a cap of nothing: it refuses every
-        # capped role and leaves `dev` (R22.9) able to sign in and fix it.
+        store = MissingLedger()
         cap = 0.0
+    else:
+        try:
+            cap = float(settings["cap_usd"])
+        except Exception:
+            # A cap that cannot be read is a cap of nothing: it refuses every
+            # capped role and leaves `dev` (R22.9) able to sign in and fix it.
+            cap = 0.0
+    # Buffered, and rebuilt every run so no read outlives the turn it was made
+    # for. Without this every paid client's guard is its own round trip and
+    # every recorded cost is another — five or so per chat turn, and one per
+    # *window* on a document scan, which measured at roughly 550 connections
+    # for a 2 MB upload. A free-tier pooler refuses long before that, and
+    # because the ledger fails closed (R22.12) the refusal takes the whole app
+    # down rather than merely slowing it. `main` flushes it in a `finally`.
+    ledger = BufferedLedger(store)
+    st.session_state[SPEND_BUFFER_KEY] = ledger
     return Budget(ledger=ledger, cap=cap, estimate=estimate)
 
 
@@ -583,7 +602,7 @@ def sync_knowledgebase(api_key, identity, budget):
     return kb
 
 
-def main() -> None:
+def _run() -> None:
     # Authentication and authorization first, before a key is even read
     # (R21.2, R21.11). Every turn spends the operator's own credit, so an
     # unauthorized visitor must not reach a model selector, an uploader, or a
@@ -1120,6 +1139,29 @@ def main() -> None:
         # A single rerun refreshes the sidebar (context usage + spend) now that
         # the turn is complete — no mid-turn recompute needed.
         st.rerun()
+
+
+def main() -> None:
+    """Run one Streamlit script run, and always settle the spend it made.
+
+    The flush is in a `finally` because the ordinary ways this script ends are
+    exceptions: `st.stop()` on every refusal path and `st.rerun()` after a
+    completed turn both raise, and a plain call at the end of `_run` would be
+    reached by neither. Spend buffered during a run and never written is spend
+    the next turn is decided without — under-counting, the expensive direction.
+
+    A failed flush is not raised. By the time anything is pending the money is
+    already gone, and killing the run would cost the user their answer without
+    saving the operator a cent; `BufferedLedger` keeps the amount for the next
+    attempt, and the store is read again before the next turn is allowed, so an
+    outage still stops the spending within a turn (R22.12).
+    """
+    try:
+        _run()
+    finally:
+        buffered = st.session_state.get(SPEND_BUFFER_KEY)
+        if buffered is not None:
+            buffered.flush()
 
 
 if __name__ == "__main__":
