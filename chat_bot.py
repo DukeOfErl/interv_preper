@@ -16,6 +16,7 @@ from openai import APIError, AuthenticationError
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from interview_prep.config import (
+    ASSUMED_REPLY_TOKENS,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MODEL,
     DEFAULT_REASONING_EFFORT,
@@ -59,7 +60,9 @@ from interview_prep.prompts import (
 from interview_prep.query_rewrite import QueryCondenser
 from interview_prep.retrieval import DocumentIndex
 from interview_prep.authorization import ANONYMOUS, authorize
+from interview_prep.ledger_postgres import PostgresLedger
 from interview_prep.permissions import Permission, has
+from interview_prep.spend import Budget, LedgerUnavailable, OverBudget, check_budget
 from interview_prep.policy import ContentPolicy
 from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
@@ -86,6 +89,95 @@ from interview_prep.ui import (
 
 
 ROLE_TABLE_KEY = "roles"
+SPEND_KEY = "spend"
+
+
+class MissingLedger:
+    """The store for a deployment that configured none.
+
+    Not an uncapped app. R22.12 fails closed on a ledger that cannot be read,
+    and a `[spend]` block that was never written is a ledger that cannot be
+    read — the same refusal an unusable `[roles]` table already produces
+    (R21.10), for the same reason: a deployment serving nobody is fixed in
+    minutes, while one silently uncapping every account produces only a bill.
+
+    It is a *ledger*, not a special case in the policy, so the page has exactly
+    one refusal path to render and `spend.py` never learns that Streamlit
+    secrets exist.
+    """
+
+    def total(self, email):
+        raise LedgerUnavailable(
+            "no [spend] block in secrets.toml, so spending cannot be counted"
+        )
+
+    def record(self, email, amount):
+        raise LedgerUnavailable("no [spend] block in secrets.toml")
+
+
+def spend_settings():
+    """The operator's `[spend]` configuration, or None (R22.16)."""
+    try:
+        return st.secrets[SPEND_KEY]
+    except Exception:
+        return None
+
+
+def current_budget(estimate):
+    """The budget port's adapter: secrets in, one turn's `Budget` out.
+
+    Built fresh every run rather than cached in session state, deliberately.
+    The construction opens no connection, the allowlist is already re-read per
+    run for the same reason (R21.7), and an operator who lowers the cap or
+    fixes a connection string should see it take effect on the next
+    interaction rather than after a restart.
+    """
+    settings = spend_settings()
+    try:
+        ledger = PostgresLedger(settings["connection_string"])
+    except Exception:
+        # Absent, unreadable, or missing its connection string — all the same
+        # fact to a user, and all fail closed.
+        return Budget(ledger=MissingLedger(), cap=0.0, estimate=estimate)
+    try:
+        cap = float(settings["cap_usd"])
+    except Exception:
+        # A cap that cannot be read is a cap of nothing: it refuses every
+        # capped role and leaves `dev` (R22.9) able to sign in and fix it.
+        cap = 0.0
+    return Budget(ledger=ledger, cap=cap, estimate=estimate)
+
+
+def render_over_budget(decision) -> None:
+    """R22.13: told no, told which no, and told whose problem it is.
+
+    The two refusals are not interchangeable. "You have spent your budget" is
+    about the user and is final; "the ledger is unreachable" is a deployment
+    fault the user can neither cause nor fix, and telling them they overspent
+    would send them to argue with the wrong person about a number that is not
+    theirs.
+    """
+    if getattr(decision, "reason", None) == "unpriced":
+        st.error(
+            "⚠️ This app cannot read the price of the model it would use, so "
+            "it is refusing to spend on something it cannot cost. **This is "
+            "temporary and is not a limit you have reached** — try again in a "
+            "few minutes."
+        )
+        return
+    if getattr(decision, "reason", None) == "ledger_unavailable":
+        st.error(
+            "⚠️ This app cannot reach the ledger it records spending in, so it "
+            "is refusing to spend anything. **This is a deployment fault, not "
+            "a problem with your account** — nothing you have done has used up "
+            "a budget. Please tell the operator."
+        )
+        return
+    st.error(
+        "⚠️ You have reached the spend limit for this account, so no further "
+        "interview turns can be taken. Your transcript above is unaffected. "
+        "Ask the operator if you need more."
+    )
 
 
 def role_table():
@@ -301,7 +393,7 @@ def record_warning(name, kind, reason=""):
     st.session_state["flash_warnings"].append(warning_message(entry))
 
 
-def sync_documents(api_key, container, identity) -> DocumentIndex:
+def sync_documents(api_key, container, identity, budget) -> DocumentIndex:
     """Render the document widgets into ``container`` and sync the vector index.
 
     Handles the three session-level document events: an embedding-model switch
@@ -332,18 +424,48 @@ def sync_documents(api_key, container, identity) -> DocumentIndex:
 
     docs = st.session_state["ingested_docs"]
     embedding_model = st.session_state["embedding_model"]
-    index = st.session_state.get("doc_index")
+    previous = st.session_state.get("doc_index")
+    index = previous
     if index is None or index.embedding_model != embedding_model:
         index = DocumentIndex(
             api_key=api_key,
             embedding_model=embedding_model,
             identity=identity,
+            budget=budget,
         )
-        if docs:
-            with st.spinner("Re-embedding documents with the new model…"):
-                for doc in docs:
-                    index.add_document(doc)
-        st.session_state["doc_index"] = index
+        try:
+            if docs:
+                with st.spinner("Re-embedding documents with the new model…"):
+                    for doc in docs:
+                        index.add_document(doc)
+        except OverBudget as exc:
+            # The one `add_document` call that was not wrapped. Switching the
+            # model re-embeds the whole corpus (R15.5) and the cap can be
+            # reached partway through, which leaves an index holding some
+            # documents and not others — retrieval over that is quietly worse
+            # rather than broken, which is the expensive kind of wrong. So the
+            # switch is abandoned rather than half-applied: the selector goes
+            # back to the model whose index is still intact, and the user is
+            # told why the model they picked did not take.
+            record_warning("embedding model", "budget", str(exc))
+            if previous is not None:
+                st.session_state["embedding_model"] = previous.embedding_model
+                index = previous
+            else:
+                # No intact index to fall back to (nothing was embedded before
+                # this switch). Keep the partial one rather than dropping the
+                # documents entirely; the warning is what tells the user the
+                # corpus is incomplete.
+                st.session_state["doc_index"] = index
+        else:
+            st.session_state["doc_index"] = index
+    # Handed *this* turn's budget, every run. The index lives in session state
+    # and is rebuilt only when the embedding model changes, so the `Budget` it
+    # was constructed with carries the estimate of the turn it was born in —
+    # and from turn two onward the cap would be checked against a figure for a
+    # prompt the user has already sent (R22.6). Invisible when wrong: no error,
+    # no warning, just a check asking about the wrong turn.
+    index.budget = budget
 
     new_files = [
         f
@@ -367,10 +489,24 @@ def sync_documents(api_key, container, identity) -> DocumentIndex:
             # Documents get the mid-size scan model — off the latency-critical
             # path, and reliable at much bigger windows than the chat-turn nano.
             guard = JailbreakGuard(
-                api_key=api_key, model=GUARDRAIL_DOC_MODEL, identity=identity
+                api_key=api_key,
+                model=GUARDRAIL_DOC_MODEL,
+                identity=identity,
+                budget=budget,
             )
-        with st.spinner(f"Scanning {file.name}…"):
-            verdict = guard.check_document(text)
+        try:
+            with st.spinner(f"Scanning {file.name}…"):
+                verdict = guard.check_document(text)
+        except OverBudget as exc:
+            # Scanning and indexing both spend, so a refusal here is ordinary
+            # rather than exceptional — the cap can be reached mid-session, and
+            # a pricing outage refuses a scan outright (R22.7). The file is
+            # un-remembered so that retrying after a top-up, or after the
+            # catalog comes back, actually re-processes it instead of silently
+            # skipping a file the user believes was accepted.
+            st.session_state["ingested_file_ids"].discard(file.file_id)
+            record_warning(file.name, "budget", str(exc))
+            continue
         if not should_ingest(verdict):
             if not verdict.allowed:
                 record_warning(file.name, "flagged", verdict.reason)
@@ -380,8 +516,13 @@ def sync_documents(api_key, container, identity) -> DocumentIndex:
         doc = IngestedDocument(
             name=file.name, doc_type=infer_doc_type(file.name), text=text
         )
-        with st.spinner(f"Indexing {file.name}…"):
-            index.add_document(doc)
+        try:
+            with st.spinner(f"Indexing {file.name}…"):
+                index.add_document(doc)
+        except OverBudget as exc:
+            st.session_state["ingested_file_ids"].discard(file.file_id)
+            record_warning(file.name, "budget", str(exc))
+            continue
         # Re-uploading a file with the same name replaces the earlier version
         # (add_document already replaced its chunks) — worth a warning, since
         # the user may not have intended to lose the previous one.
@@ -397,7 +538,7 @@ def sync_documents(api_key, container, identity) -> DocumentIndex:
     return index
 
 
-def sync_knowledgebase(api_key, identity):
+def sync_knowledgebase(api_key, identity, budget):
     """Open the persistent knowledge base and reconcile it with the seeds.
 
     The content sync runs once per session; the embedding-coverage sync also
@@ -415,13 +556,26 @@ def sync_knowledgebase(api_key, identity):
     try:
         if kb is None:
             kb = KnowledgeBase(
-                db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key, identity=identity
+                db_path=KNOWLEDGEBASE_DB_PATH,
+                api_key=api_key,
+                identity=identity,
+                budget=budget,
             )
         if st.session_state.get("kb_synced_model") != model:
             with st.spinner("Syncing the knowledge base…"):
                 kb.sync(KNOWLEDGEBASE_DIR, model)
             st.session_state["kb_synced_model"] = model
         st.session_state["knowledgebase"] = kb
+        # Same reason as the document index: opened once per session, so the
+        # current turn's budget has to be handed to it on every run.
+        kb.budget = budget
+    except OverBudget as exc:
+        # Not latched, unlike every other failure here. `kb_failed` disables
+        # the knowledge base for the rest of the session and is only cleared by
+        # an embedding-model switch, which is right for a broken database and
+        # wrong for a refusal that a top-up — or the next turn — undoes.
+        record_warning("", "knowledgebase", str(exc))
+        return None
     except Exception as exc:
         st.session_state["kb_failed"] = model
         record_warning("", "knowledgebase", str(exc))
@@ -568,6 +722,31 @@ def main() -> None:
         ),
     )
 
+    # The cap, read fresh from the store on every run (R22.11) — an in-process
+    # total would be a cache of a number another container may have moved.
+    # Decided against the *next-prompt estimate*, not against the total, so the
+    # turn that would cross the cap is the one refused (R22.6).
+    estimate = spend.next_estimate
+    if estimate is None and pricing.is_known:
+        # R10.6: nothing has been measured yet, which is true of the first turn
+        # of *every* session while the ledger's total is a lifetime one. Rather
+        # than fall back to the policy's flat floor, price what is actually
+        # known — the composed prompt and the history, at this model's rate —
+        # so the figure follows the configured model instead of a constant
+        # typed in beside it. Only when the rate is actually known: an
+        # unreachable catalog prices everything at zero, and a zero estimate
+        # would read as "this turn is free" rather than "we could not price
+        # it", which is what the policy's floor is for.
+        estimate = turn_cost(
+            pricing,
+            estimate_prompt_tokens(system_prompt, messages),
+            ASSUMED_REPLY_TOKENS,
+        )
+    budget = current_budget(estimate)
+    decision = check_budget(
+        identity, ledger=budget.ledger, cap=budget.cap, estimate=budget.estimate
+    )
+
     # Interview tab, top → bottom: interviewer picker, effort selector just below
     # it, the context-window usage gauge, then the spend figures (no header — the
     # labels speak for themselves), then a slot the grounding warning fills once
@@ -579,13 +758,24 @@ def main() -> None:
             render_reasoning_selector(REASONING_EFFORTS)
             reasoning_effort = st.session_state["reasoning_effort"]
         render_context_bar(usage)
-        render_spend_metrics(spend)
+        render_spend_metrics(spend, decision)
         grounding_warning_slot = st.empty()
 
     # The uploader renders into the interview tab (below the above), then the
     # ingested panel renders right under it.
-    doc_index = sync_documents(api_key, interview_tab, identity)
-    kb = sync_knowledgebase(api_key, identity)
+    # Refused before anything paid is reachable, and before the uploader:
+    # ingesting a document scans and embeds it, which spends (R22.8 — the
+    # refusal is hard, not a quieter version of the app). The transcript is
+    # rendered first, because losing sight of the interview is not part of the
+    # penalty for running out of budget.
+    if not decision.allowed:
+        st.title("Interview preparation Chatbot")
+        render_history(messages)
+        render_over_budget(decision)
+        st.stop()
+
+    doc_index = sync_documents(api_key, interview_tab, identity, budget)
+    kb = sync_knowledgebase(api_key, identity, budget)
     if st.session_state["ingested_docs"] and not library.is_grounding_aware:
         grounding_warning_slot.warning(
             "⚠️ This prompt source is not grounding-aware — uploaded "
@@ -654,21 +844,29 @@ def main() -> None:
         def condense_with_spinner(text, history):
             with st.spinner("Rephrasing your question for search…"):
                 return QueryCondenser(
-                    api_key=api_key, identity=identity
+                    api_key=api_key, identity=identity, budget=budget
                 ).condense(text, history)
 
-        with st.spinner("Retrieving document excerpts…"):
-            grounded = ground_turn(
-                prompt=prompt,
-                history=messages,
-                system_prompt=system_prompt,
-                is_grounding_aware=library.is_grounding_aware,
-                doc_index=doc_index,
-                kb=kb,
-                embedding_model=st.session_state["embedding_model"],
-                condense=condense_with_spinner,
-                warn=record_warning,
-            )
+        # A budget that ran out between the page's check and this call (a
+        # second tab, a second container) refuses here instead of degrading the
+        # turn to an ungrounded one — R22.8 makes the refusal hard, and a
+        # quietly worse answer is the downgrade it forbids.
+        try:
+            with st.spinner("Retrieving document excerpts…"):
+                grounded = ground_turn(
+                    prompt=prompt,
+                    history=messages,
+                    system_prompt=system_prompt,
+                    is_grounding_aware=library.is_grounding_aware,
+                    doc_index=doc_index,
+                    kb=kb,
+                    embedding_model=st.session_state["embedding_model"],
+                    condense=condense_with_spinner,
+                    warn=record_warning,
+                )
+        except OverBudget as exc:
+            render_over_budget(exc.decision)
+            st.stop()
         effective_prompt = grounded.effective_prompt
         # A `None` query means nothing was searched, so the Developer tab keeps
         # showing the last real retrieval rather than being blanked by a turn
@@ -677,12 +875,13 @@ def main() -> None:
             st.session_state["last_query"] = grounded.query
             st.session_state["last_retrieval"] = grounded.retrieved
 
-        guard = JailbreakGuard(api_key=api_key, identity=identity)
+        guard = JailbreakGuard(api_key=api_key, identity=identity, budget=budget)
         llm = InterviewAgent(
             api_key=api_key,
             model=model,
             reasoning_effort=reasoning_effort,
             identity=identity,
+            budget=budget,
         )
         pending = messages + [{"role": "user", "content": prompt}]
         reply_parts = []
@@ -741,6 +940,7 @@ def main() -> None:
                         api_key=api_key,
                         model=GUARDRAIL_DOC_MODEL,
                         identity=identity,
+                        budget=budget,
                     ),
                     index=doc_index,
                     # Raised from inside wrap_tool_call, i.e. off the script
@@ -749,7 +949,9 @@ def main() -> None:
                     on_document=in_script_thread(register_document),
                 )
                 tools = build_tools(
-                    researcher=WebResearcher(api_key=api_key, identity=identity),
+                    researcher=WebResearcher(
+                        api_key=api_key, identity=identity, budget=budget
+                    ),
                     cache=st.session_state["web_research_cache"],
                     mcp=github_mcp,
                 )
@@ -790,6 +992,13 @@ def main() -> None:
                         # Stream finished on its own — now wait for the verdict
                         # before committing anything.
                         verdict = guard_future.result()
+                except OverBudget as exc:
+                    # The cap caught up with the turn mid-flight: the page
+                    # checked before it started, and another tab or container
+                    # spent the rest in between (R22.7's one-turn window).
+                    slot.empty()
+                    stream_failed = True
+                    render_over_budget(exc.decision)
                 except AuthenticationError:
                     slot.empty()
                     stream_failed = True
@@ -812,6 +1021,15 @@ def main() -> None:
                         "⚠️ The request to OpenRouter failed, so no reply was "
                         f"generated. Please try again. ({detail})"
                     )
+
+        # This turn's spend, whatever became of the turn (R22.4). Both
+        # `st.stop()`s below end the run before the accounting block further
+        # down, so anything recorded there is lost on exactly the two paths
+        # where spend has already happened and produced no output. The ledger
+        # is not at risk — every client records its own, the agent included,
+        # from a `finally` — but the sidebar figure is, and a blocked turn
+        # showing no cost is how a user concludes the guardrail is free.
+        st.session_state["total_cost"] += (llm.turn_cost_usd or 0.0) + llm.extra_cost
 
         if stream_failed:
             st.stop()
@@ -874,25 +1092,13 @@ def main() -> None:
                 # recorded — the model skipped the record_evaluation call. The
                 # user-facing text lives in ui.warning_message.
                 record_warning("", "evaluation")
-        cost = llm.last_cost
-        if cost is None:
-            pricing_now = get_model_pricing(model, api_key)
-            if llm.last_usage is not None:
-                cost = turn_cost(
-                    pricing_now,
-                    llm.last_usage.prompt_tokens or 0,
-                    llm.last_usage.completion_tokens or 0,
-                )
-            else:
-                cost = turn_cost(
-                    pricing_now,
-                    estimate_prompt_tokens(effective_prompt, pending),
-                    estimate_text_tokens(assistant_reply),
-                )
-        # Tool sub-completions (web research) bill separately from the main
-        # stream's usage chunks; the turn's state accumulated their cost.
-        cost += llm.extra_cost
-        st.session_state["total_cost"] += cost
+        # The whole R22.3 ladder — actual cost, else reported tokens, else
+        # estimated ones — lives in the agent now, because it is the only
+        # object on every exit path from a turn. The page's copy of it sat
+        # below the two `st.stop()`s above, so a blocked turn priced at rungs
+        # two or three recorded nothing at all (R22.18: what is left here is a
+        # display of this chat's contribution to a durable total, never the
+        # authority on it).
 
         # Record the reasoning tokens this turn spent so the next-prompt estimate
         # can account for them (they're billed as output but absent from content).

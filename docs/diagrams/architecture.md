@@ -27,7 +27,13 @@ sequenceDiagram
     participant R as DocumentIndex +<br/>KnowledgeBase
     participant G as JailbreakGuard<br/>(guardrails.py)
     participant L as InterviewAgent<br/>(agent.py)
+    participant LG as spend ledger<br/>(ledger_postgres.py)
 
+    CB->>LG: total(email) — every run, before anything paid
+    LG->>CB: lifetime spend → decide(role, spent, cap, estimate)
+    alt over the cap, or the ledger is unreachable
+        CB->>U: refuse the turn, naming which refusal it is
+    end
     U->>CB: prompt
     opt grounding-aware source & anything indexed (uploads or knowledge base)
         CB->>R: retrieve top-k chunks from each
@@ -46,13 +52,22 @@ sequenceDiagram
     alt verdict is jailbreak (whenever it lands)
         CB->>U: stop stream, clear text, warn — nothing persisted
     else allowed
-        CB->>CB: add actual cost, persist turn<br/>+ evaluation cards, single rerun
+        CB->>CB: persist turn + evaluation cards, single rerun
     end
+    Note over G,LG: every paid client records its own cost as it spends —<br/>including the guardrail on a blocked turn (R22.4)
 ```
 
 Key points: retrieval happens *before* the stream; the guardrail runs
 *concurrently with* the stream and is polled between tokens; the sidebar
 refreshes only on the rerun after the turn completes.
+
+The ledger is read on **every run** and written by **whichever client spent**,
+not by the chat loop at the end — which is why a turn the guardrail blocks
+still records what the guardrail cost. The one exception is the fallback for a
+turn OpenRouter reported no cost for: the catalog and the token estimates live
+in the page, so the page records that figure (R22.3's lower rungs). The cap is
+compared against the *next-prompt estimate*, so the refusal lands on the turn
+that would cross it rather than on the turn after.
 
 ## 2. A tool-calling turn (web research shown)
 
@@ -264,12 +279,14 @@ flowchart TB
         llmC["agent + accounting<br/>agent.py · middleware.py · pricing.py · context.py"]
         toolsC["tools + policy<br/>tools.py · policy.py · web_research.py · github_mcp.py"]
         uiC["rendering<br/>ui.py"]
-        access["who may be here, and what they may do<br/>authorization.py · permissions.py"]
+        access["who may be here, what they may do, what it may cost<br/>authorization.py · permissions.py · spend.py"]
+        ledger["spend ledger adapter<br/>ledger_postgres.py"]
     end
 
     mdfiles["prompts/*.md — interviewer behavior lives here, not in Python<br/>(personas + guardrail classifier prompt)"]
     kbfiles["knowledgebase/*.md — curated seeds (versioned);<br/>data/knowledgebase.db is derived, gitignored"]
     orouter["OpenRouter API<br/>/chat/completions · /models · /embeddings"]
+    pg["hosted Postgres<br/>one spend row per email"]
     ghmcp["GitHub MCP server<br/>tools/list · tools/call"]
     evals["evals/ — standalone prompt evals<br/>(reuses prompt loading; never imported by the app)"]
 
@@ -283,6 +300,8 @@ flowchart TB
     llmC -.-> orouter
     toolsC -.-> orouter
     toolsC -.-> ghmcp
+    ledger --> access
+    ledger -.-> pg
     evals --> promptsC
     evals -.-> orouter
 
@@ -290,12 +309,13 @@ flowchart TB
     classDef mdfile fill:#dfeef7,stroke:#2b6a8f,color:#000
     class orouter ext
     class ghmcp ext
+    class pg ext
     class mdfiles mdfile
     class kbfiles mdfile
 ```
 
 The access cluster has **no outgoing edges** — no markdown, no OpenRouter, no
-framework. That is deliberate (ADR-0190, ADR-0200): the page, the agent path
+database driver, no framework. That is deliberate (ADR-0190, ADR-0200): the page, the agent path
 and the tests all ask the same objects, so they may depend on nothing those
 three don't share. `chat_bot.py` holds the identity port's only adapter,
 `current_identity()`, which reads `st.user` and the `[roles]` table in
@@ -304,11 +324,18 @@ three don't share. `chat_bot.py` holds the identity port's only adapter,
 What the box hides is that the two files answer different questions, and the
 package's other clusters use them differently: `permissions.py` grades what an
 authorized role may *do* (one sidebar tab, so far), while
-`authorization.py` decides whether the caller may be here at all — and its
-`require_authorized` is called *inside* all six paid clients (in `safety`,
-`rag`, `llmC` and `toolsC`), not only by `entry`. Those six edges are left
-undrawn: they cross every cluster and would say only "everything that spends
-checks", which this sentence says better (R21.10).
+`authorization.py` decides whether the caller may be here at all, and
+`spend.py` decides how much that caller may spend — and both
+`require_authorized` and `require_within_budget` are called *inside* all six
+paid clients (in `safety`, `rag`, `llmC` and `toolsC`), not only by `entry`.
+Those edges are left undrawn: they cross every cluster and would say only
+"everything that spends checks", which this sentence says better (R21.10,
+R22.5).
+
+`ledger_postgres.py` sits outside the cluster and points *into* it: the driver
+depends on the policy, never the reverse, which is what keeps `spend.py`
+testable with no database and what would make swapping the store (ADR-0210's
+declined option) one file's worth of work.
 
 The full module-by-module list (what each file exports) lives in
 [`CLAUDE.md`](../../CLAUDE.md) and the [`README`](../../README.md) — inventories read

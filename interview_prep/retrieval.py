@@ -27,6 +27,8 @@ from .config import (
     TOP_K,
 )
 from .ingest import IngestedDocument
+from .pricing import bill_embedding
+from .spend import UNCAPPED, resolve_budget
 
 
 @dataclass(frozen=True)
@@ -44,14 +46,23 @@ class RetrievedChunk:
 class DocumentIndex:
     """Session-scoped vector index over the uploaded documents."""
 
-    def __init__(self, api_key, embedding_model, embeddings=None, identity=None):
+    def __init__(
+        self, api_key, embedding_model, embeddings=None, identity=None, budget=None
+    ):
         # Spends the operator's credit (R21.10, ADR-0200). Guarded here rather
         # than in the caller because `evals/`, `tests/` and any future script
         # reach this constructor without passing through the page. Only when
         # the *real* client is built: an injected fake spends nothing.
         if embeddings is None:
             require_authorized(identity, "DocumentIndex")
+            budget = resolve_budget(budget, "DocumentIndex")
         self.embedding_model = embedding_model
+        self._api_key = api_key
+        self._identity = identity
+        # The index outlives the turn — it is built once per session and kept
+        # in session state — so the cap cannot be checked at construction and
+        # is checked at each embedding call instead (R22.5).
+        self.budget = budget or UNCAPPED
         # Allow injected embeddings (tests); otherwise embed via OpenRouter.
         # check_embedding_ctx_length uses tiktoken to pre-tokenize, which only
         # works for OpenAI-named models — disabled so any catalog model works.
@@ -76,6 +87,7 @@ class DocumentIndex:
 
         Re-adding a document with the same name replaces the previous version.
         """
+        self.budget.require(self._identity)
         self.remove_document(doc.name)
         chunks = self._splitter.split_text(doc.text)
         metadatas = [
@@ -88,6 +100,7 @@ class DocumentIndex:
             for i in range(len(chunks))
         ]
         ids = self._store.add_texts(chunks, metadatas=metadatas)
+        self._bill(chunks)
         self._ids_by_doc[doc.name] = list(ids)
         doc.n_chunks = len(chunks)
         return len(chunks)
@@ -104,10 +117,30 @@ class DocumentIndex:
             if record:
                 record["metadata"]["doc_type"] = doc_type
 
+    def _bill(self, texts) -> None:
+        """Record what was just embedded (R22.2). Never raises.
+
+        `grounding.ground_turn` wraps `retrieve` in a fail-open handler, so a
+        billing exception here would degrade the turn to an ungrounded one and
+        report it to the user as a retrieval outage — a bookkeeping fault
+        wearing a retrieval fault's clothes.
+        """
+        bill_embedding(
+            self.budget,
+            self._identity,
+            texts,
+            self.embedding_model,
+            self._api_key,
+        )
+
     def retrieve(self, query: str, k: int = TOP_K) -> list[RetrievedChunk]:
         if self.is_empty:
             return []
+        # Retrieval embeds the query, so it spends too — a smaller call than
+        # indexing, and one that happens on every single turn.
+        self.budget.require(self._identity)
         results = self._store.similarity_search_with_score(query, k=k)
+        self._bill([query])
         return [
             RetrievedChunk(
                 text=document.page_content,

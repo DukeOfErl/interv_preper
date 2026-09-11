@@ -12,6 +12,7 @@ import pytest
 
 from interview_prep.config import GUARDRAIL_DOC_MODEL
 from interview_prep.authorization import authorize
+from interview_prep.spend import UNCAPPED
 from interview_prep.guardrails import JailbreakGuard
 
 # These tests spend real credit against a live model, so they must declare an
@@ -35,7 +36,9 @@ requires_key = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def guard():
-    return JailbreakGuard(api_key=API_KEY, identity=INTEGRATION_IDENTITY)
+    return JailbreakGuard(
+        api_key=API_KEY, identity=INTEGRATION_IDENTITY, budget=UNCAPPED
+    )
 
 
 @requires_key
@@ -79,7 +82,10 @@ def doc_guard():
     (see the rationale in ``config.py``).
     """
     return JailbreakGuard(
-        api_key=API_KEY, model=GUARDRAIL_DOC_MODEL, identity=INTEGRATION_IDENTITY
+        api_key=API_KEY,
+        model=GUARDRAIL_DOC_MODEL,
+        identity=INTEGRATION_IDENTITY,
+        budget=UNCAPPED,
     )
 
 

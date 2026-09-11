@@ -104,7 +104,35 @@ Warnings you can act on (a rejected upload, a retrieval fallback, an unverified 
 
 > **Never commit `.streamlit/secrets.toml`** — it holds a live client secret and your cookie signing key. Only the `.example` template belongs in git. On Streamlit Community Cloud, paste the same contents into the app's *Secrets* settings instead of committing a file.
 
-The email address the app trusts is the **verified** email claim from the provider (`email_verified`), because OIDC proves an address only if the provider says it verified it; a session without one is treated as not signed in. Sessions are re-checked on every run and an expired token is logged out. See `docs/REQUIREMENTS.md` § 21 and [ADR-0200](docs/decisions/0200-authentication-is-oidc-plus-an-explicit-allowlist.md); per-user API keys and per-user spend caps remain planned separately (§ 20).
+The email address the app trusts is the **verified** email claim from the provider (`email_verified`), because OIDC proves an address only if the provider says it verified it; a session without one is treated as not signed in. Sessions are re-checked on every run and an expired token is logged out. See `docs/REQUIREMENTS.md` § 21 and [ADR-0200](docs/decisions/0200-authentication-is-oidc-plus-an-explicit-allowlist.md).
+
+### Spend cap
+
+**An invited user is not an unlimited one.** Every turn draws on the operator's OpenRouter credit, so each authorized address has a lifetime USD budget, counted in an external Postgres and checked before every turn. A `dev` is not capped. The earlier plan — make a `user` bring their own API key — is withdrawn: it defends the wallet by removing the reason to visit (`docs/REQUIREMENTS.md` § 22, [ADR-0210](docs/decisions/0210-hosted-postgres-ledger-for-the-spend-cap.md)).
+
+5. **Create the ledger table** in a hosted Postgres (Supabase's free tier is what this was built against):
+
+   ```sql
+   create table spend (
+     email      text primary key,
+     total_usd  numeric(18, 12) not null default 0,
+     updated_at timestamptz     not null default now()
+   );
+   ```
+
+6. **Write `[spend]`** into the same secrets file — the **transaction pooler** connection string (port 6543; the app disables prepared statements for it) and the cap:
+
+   ```toml
+   [spend]
+   connection_string = "postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres"
+   cap_usd = 5.00
+   ```
+
+   Percent-encode the password: Supabase generates passwords containing `@`, `:` and `/`, and a raw one splits the URI at the wrong place — which libpq reports as a host it cannot resolve, reading like a DNS fault rather than a quoting one.
+
+   **A missing or unreachable ledger refuses every turn**, for the same reason an unusable `[roles]` table authorizes nobody: the alternative silently uncaps every account at exactly the moment nobody is watching. The sidebar shows a capped user what is left; a user who runs out and a deployment whose database is down are told different things, because only one of them is about the user.
+
+Why a hosted database rather than the SQLite file the knowledge base uses: Streamlit Community Cloud recycles containers freely, so a local total silently resets to zero, and two containers may serve the same person at once. ADR-0210 also records, plainly, that OpenRouter's provisioned per-user keys would be the better mechanism, and why this one was chosen anyway.
 
 ## Run
 

@@ -11,6 +11,54 @@ any release; `1.0.0` when it stabilizes.
 ## [Unreleased]
 
 ### Added
+- **A per-identity spend cap.** Each authorized address has a lifetime USD
+  budget, held in an external Postgres and read before every turn; the turn is
+  refused when the *next-prompt estimate* no longer fits in what is left, so
+  the cap is not crossed by the turn that discovers it. `dev` is not capped.
+  Being at the limit and being unable to reach the ledger are different
+  refusals with different wording — the second is a deployment fault the user
+  can neither cause nor fix — and the sidebar shows a capped role what remains.
+  An unreachable **or unconfigured** ledger refuses every turn, deliberately:
+  the alternative uncaps every account at the moment nobody is watching.
+  Requires a `[spend]` block in `.streamlit/secrets.toml` and the new `psycopg`
+  dependency; see the README and [ADR-0210](docs/decisions/0210-hosted-postgres-ledger-for-the-spend-cap.md).
+- **All six paid clients now report what they spend.** The pre-send guardrail,
+  the query condenser and the two embedding paths previously spent the
+  operator's credit and reported none of it, so any accounting built on the
+  other two counted a third of the bill. Each call is priced down a three-rung
+  ladder (R22.3): OpenRouter's reported cost, else the token counts it reported
+  priced from the catalog, else estimated tokens priced the same way. The
+  embedding paths can only ever reach the bottom rung — LangChain returns
+  vectors and keeps the response — and their price comes from the per-model
+  `/endpoints` route, **not** from `/models`, which is the chat catalog and
+  lists none of this app's embedding models. Reading the price from the wrong
+  route is why those two paths recorded exactly $0.00 in an earlier draft of
+  this work.
+- **Spend that produced no output is still recorded.** A turn the safety
+  guardrail blocks, or one that dies on a provider error mid-stream, has
+  already cost the operator every hop that ran. Each client now records from
+  the operation that spent, on every exit path — including an interview stream
+  the page abandons the instant a jailbreak verdict lands, which previously
+  spent dollars and recorded nothing.
+- **Known and accepted: a pricing outage narrows the cap.** Prices come from
+  OpenRouter's catalog, and when it cannot be read every rung of the cost
+  ladder below the provider's own reported figure returns zero — so the four
+  completion clients keep counting (their cost is reported with the response
+  and needs no catalog) while the two embedding paths record nothing. For the
+  duration of such an outage the cap counts four of six. This is R22.3's named
+  hole rather than a new defect, the amounts are microdollars, and it is
+  bounded by the outage; it is written down because a hole that is documented
+  is a decision and the same hole undocumented is a bug waiting to be found.
+  What is *not* allowed to happen is an unknown price reading as free: an
+  estimate the app cannot price is treated as unmeasured, and a document scan
+  — the one operation whose fan-out is unbounded — is refused outright rather
+  than admitted on the turn-sized fallback, with its own wording so a user
+  during an outage is not told they overspent.
+- **A document scan is checked against its own size.** Screening an upload
+  makes one classifier call per overlapping window, so its cost scales with the
+  file rather than with the conversation; it is now admitted against an
+  estimate of the whole scan instead of against the next chat prompt's
+  estimate, which is how a $5 cap could have paid for a $24 upload.
 - **Sign-in is required, and signing in is not enough.** Authentication is
   Streamlit's native OIDC (`st.login` / `st.user` / `st.logout`, requiring
   the new `Authlib` dependency), configured through an `[auth]` block in

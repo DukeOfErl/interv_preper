@@ -29,6 +29,7 @@ import pytest
 
 from interview_prep.authorization import ANONYMOUS, Identity, Unauthorized, authorize
 from interview_prep.permissions import Role
+from interview_prep.spend import UNCAPPED, OverBudget
 
 AUTHORIZED = authorize(
     "operator@example.com",
@@ -46,42 +47,55 @@ REFUSED = [
 ]
 
 
+# Every builder passes `budget=UNCAPPED` explicitly. This file's subject is the
+# *authorization* guard, not the cap, and since R22.5's fix a paid client
+# refuses to build a real client with no budget named rather than defaulting to
+# uncapped (`spend.resolve_budget`) — the arming must not be the caller's to
+# forget. Saying "nothing is counting" out loud is exactly what that change
+# asks of a caller that genuinely is not counting.
+
+
 def build_guardrail(identity):
     from interview_prep.guardrails import JailbreakGuard
 
-    return JailbreakGuard(api_key="k", identity=identity)
+    return JailbreakGuard(api_key="k", identity=identity, budget=UNCAPPED)
 
 
 def build_condenser(identity):
     from interview_prep.query_rewrite import QueryCondenser
 
-    return QueryCondenser(api_key="k", identity=identity)
+    return QueryCondenser(api_key="k", identity=identity, budget=UNCAPPED)
 
 
 def build_researcher(identity):
     from interview_prep.web_research import WebResearcher
 
-    return WebResearcher(api_key="k", identity=identity)
+    return WebResearcher(api_key="k", identity=identity, budget=UNCAPPED)
 
 
 def build_index(identity):
     from interview_prep.retrieval import DocumentIndex
 
-    return DocumentIndex(api_key="k", embedding_model="e", identity=identity)
+    return DocumentIndex(
+        api_key="k", embedding_model="e", identity=identity, budget=UNCAPPED
+    )
 
 
 def build_knowledgebase(identity, tmp_path):
     from interview_prep.knowledgebase import KnowledgeBase
 
     return KnowledgeBase(
-        db_path=str(tmp_path / "kb.db"), api_key="k", identity=identity
+        db_path=str(tmp_path / "kb.db"),
+        api_key="k",
+        identity=identity,
+        budget=UNCAPPED,
     )
 
 
 def build_agent(identity):
     from interview_prep.agent import InterviewAgent
 
-    agent = InterviewAgent(api_key="k", model="m", identity=identity)
+    agent = InterviewAgent(api_key="k", model="m", identity=identity, budget=UNCAPPED)
     # The agent defers its refusal to the turn, because constructing one is
     # free — `create_agent` is what costs. Drive it to the boundary.
     return agent.stream_reply("sys", [{"role": "user", "content": "go"}])
@@ -222,3 +236,101 @@ def test_the_construction_scan_actually_finds_something():
     assert constructions, "the scan found no paid clients at all — it is broken"
     modules = {f for f, _, _, _ in constructions}
     assert "agent.py" in modules, modules
+
+
+# --- the budget guard must be armed, not defaulted --------------------------
+#
+# The authorization guard above is pinned client by client, mechanically, so a
+# new paid client that forgets it fails this file rather than shipping. Until
+# now nothing did the same for the *budget* guard, and that asymmetry had a
+# cost: a review of one implementation found the cap wired into only four of
+# six clients while the suite stayed green, because no test asserted the other
+# two were ever handed a ledger.
+#
+# The specific hole was `budget or UNCAPPED`. `identity=None` fails closed —
+# the client raises rather than serving an unidentified caller — while
+# `budget=None` failed open, resolving silently to "nobody is counting". A
+# caller bypassed the cap by omitting one keyword. That is the same "guards
+# belong to the operation" corollary that motivated § 21: the arming must not
+# be the caller's to forget.
+
+
+def build_guardrail_unarmed(identity):
+    from interview_prep.guardrails import JailbreakGuard
+
+    return JailbreakGuard(api_key="k", identity=identity)
+
+
+def build_condenser_unarmed(identity):
+    from interview_prep.query_rewrite import QueryCondenser
+
+    return QueryCondenser(api_key="k", identity=identity)
+
+
+def build_researcher_unarmed(identity):
+    from interview_prep.web_research import WebResearcher
+
+    return WebResearcher(api_key="k", identity=identity)
+
+
+def build_index_unarmed(identity):
+    from interview_prep.retrieval import DocumentIndex
+
+    return DocumentIndex(api_key="k", embedding_model="e", identity=identity)
+
+
+def build_agent_unarmed(identity):
+    from interview_prep.agent import InterviewAgent
+
+    return InterviewAgent(api_key="k", model="m", identity=identity)
+
+
+UNARMED_PAID_CLIENTS = [
+    pytest.param(build_guardrail_unarmed, id="guardrail"),
+    pytest.param(build_condenser_unarmed, id="query-condenser"),
+    pytest.param(build_researcher_unarmed, id="web-researcher"),
+    pytest.param(build_index_unarmed, id="document-embeddings"),
+    pytest.param(build_agent_unarmed, id="agent"),
+]
+
+
+@pytest.mark.parametrize("build", UNARMED_PAID_CLIENTS)
+def test_a_paid_client_refuses_to_build_with_no_budget_named(build):
+    """An authorized identity is not enough: the cap must be armed (R22.5)."""
+    with pytest.raises(OverBudget):
+        build(AUTHORIZED)
+
+
+def test_the_knowledge_base_refuses_to_build_with_no_budget_named(tmp_path):
+    from interview_prep.knowledgebase import KnowledgeBase
+
+    with pytest.raises(OverBudget):
+        KnowledgeBase(
+            db_path=str(tmp_path / "kb.db"), api_key="k", identity=AUTHORIZED
+        )
+
+
+def test_every_paid_client_is_covered_by_the_budget_table():
+    """The count that makes the table above a check rather than a sample.
+
+    Mirrors `test_spend_is_guarded`'s own count for the authorization guard: a
+    seventh paid client added without a budget guard fails here, instead of
+    being quietly absent from a list nobody rereads.
+    """
+    # Five in the table, plus the knowledge base on its own because it needs a
+    # scratch database path.
+    assert len(UNARMED_PAID_CLIENTS) + 1 == EXPECTED_PAID_CLIENTS
+
+
+def test_uncapped_is_accepted_when_said_out_loud():
+    """The other direction: a caller that genuinely is not counting must work.
+
+    A rule that classifies moves records in both directions, and only the
+    intended one gets looked at. If `UNCAPPED` stopped being accepted, `evals/`
+    and every integration suite would break — so the permissive branch is
+    asserted too, not assumed.
+    """
+    from interview_prep.guardrails import JailbreakGuard
+
+    guard = JailbreakGuard(api_key="k", identity=AUTHORIZED, budget=UNCAPPED)
+    assert guard.budget is UNCAPPED

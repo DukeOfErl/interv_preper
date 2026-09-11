@@ -47,6 +47,7 @@ from .config import (
 )
 from .ingest import IngestedDocument
 from .policy import ToolOutcome
+from .spend import OverBudget
 
 
 # One dimension actually being scored: the dimension name, then at most a
@@ -318,7 +319,27 @@ def _web_research_tool(researcher, cache):
             return PENDING_SCREEN, ToolOutcome.own_output(cached)
 
         runtime.stream_writer({"progress": f"Researching the web: {query}…"})
-        result = researcher.research(query)
+        try:
+            result = researcher.research(query)
+        except OverBudget as exc:
+            # Caught here rather than left to ToolRetryMiddleware, which would
+            # retry a *hard* refusal twice and then tell the model the lookup
+            # failed because of "a fault in the interview app" (R22.8). It is
+            # not a fault and it will not succeed on retry — the cap is the
+            # answer, not a transient. This is the guardrail's fail-open
+            # wearing a different costume: a refusal reaching a generic
+            # handler and coming back out as a degraded answer.
+            #
+            # The turn itself continues. The cap was cleared when the turn
+            # started; what ran out is the budget for an *extra* paid
+            # sub-completion, and R22.7 accepts the turn in flight.
+            return PENDING_SCREEN, ToolOutcome.own_output(
+                "error: web research was refused because the spend limit for "
+                "this account has been reached. Do not retry it. Tell the "
+                "candidate plainly that you could not search the web, and "
+                "continue the interview without it.",
+                warning=(query, "budget", str(exc)),
+            )
         if result.errored:
             return PENDING_SCREEN, ToolOutcome.own_output(
                 "error: web research is unavailable right now",

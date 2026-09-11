@@ -46,6 +46,38 @@ def fetch_openrouter_models(api_key):
     return payload.get("data", []) if isinstance(payload, dict) else []
 
 
+@st.cache_data(ttl=MODELS_CACHE_TTL_SECONDS)
+def fetch_model_endpoints(model_id, api_key):
+    """Fetch one model's provider endpoints (cached). Returns [] on any failure.
+
+    A second route, because the catalog ``/models`` returns is the **chat**
+    catalog: none of ``config.EMBEDDING_MODELS`` appears in it, so a price
+    looked up there is not "unknown pricing" (R22.3's named hole) but a
+    published price this app was reading from the wrong place. ``/models/{id}/
+    endpoints`` carries it — verified against the live API for all three
+    configured embedding models.
+
+    Same fail-soft contract, and the same three exception bases, as
+    ``fetch_openrouter_models``: a pricing lookup must never take the page down.
+    """
+    if not api_key or not model_id:
+        return []
+
+    req = request.Request(
+        f"{OPENROUTER_BASE_URL}/models/{model_id}/endpoints",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with request.urlopen(req, timeout=8) as api_result_handle:
+            payload = json.loads(api_result_handle.read().decode("utf-8"))
+    except (OSError, HTTPException, ValueError):
+        return []
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    return endpoints if isinstance(endpoints, list) else []
+
+
 def find_model(models, model_id):
     """Return the OpenRouter catalog entry matching ``model_id``, or ``None``.
 

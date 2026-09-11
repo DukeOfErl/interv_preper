@@ -108,8 +108,14 @@ class Identity:
 ANONYMOUS = Identity()
 
 
-def _normalise(value):
+def normalise_email(value):
     """An email reduced to its comparison form, or None if there isn't one.
+
+    Public because two other modules need *this* rule and not a second one like
+    it: the spend ledger keys its rows on the same comparison form the
+    allowlist matches on, and a ledger that normalised differently would give
+    one person two rows and twice the cap. Reaching for it through a private
+    name was an invitation to reimplement it instead.
 
     Casing and surrounding whitespace are not a security boundary (R21.8);
     treating them as one only produces refusals nobody can explain. Anything
@@ -121,6 +127,10 @@ def _normalise(value):
         return None
     normalised = value.strip().lower()
     return normalised or None
+
+
+#: The name the rest of this module was written against.
+_normalise = normalise_email
 
 
 def authorize(email, *, table, email_verified=False) -> Identity:

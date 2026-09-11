@@ -16,6 +16,7 @@ import pytest
 
 from interview_prep.config import DEFAULT_EMBEDDING_MODEL, KNOWLEDGEBASE_DIR
 from interview_prep.authorization import authorize
+from interview_prep.spend import UNCAPPED
 from interview_prep.knowledgebase import KnowledgeBase
 from interview_prep.retrieval import format_context_block
 
@@ -42,7 +43,12 @@ requires_key = pytest.mark.skipif(
 def kb(tmp_path_factory):
     kb = KnowledgeBase(
         identity=INTEGRATION_IDENTITY,
-        db_path=tmp_path_factory.mktemp("kb") / "knowledgebase.db", api_key=API_KEY
+        db_path=tmp_path_factory.mktemp("kb") / "knowledgebase.db",
+        api_key=API_KEY,
+        # This suite measures retrieval quality against the real API; nothing
+        # is counting its spend, and since R22.5's fix that has to be said
+        # rather than defaulted (`spend.resolve_budget`).
+        budget=UNCAPPED,
     )
     kb.sync(KNOWLEDGEBASE_DIR, DEFAULT_EMBEDDING_MODEL)
     yield kb
