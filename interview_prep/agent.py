@@ -127,6 +127,14 @@ class InterviewAgent:
         self.last_reasoning_tokens = None
         self.last_tool_calls = []
         self.answer_text = ""
+        #: Every token this turn actually streamed, preambles included.
+        #: `answer_text` is taken from the graph's final state, which a turn
+        #: the guardrail blocks never reaches — so rung three priced an
+        #: abandoned turn's output at `estimate_text_tokens("")`, i.e. zero,
+        #: for output the provider had already billed. This is the residual
+        #: half of R22.4: the input side was fixed, the output side still read
+        #: as free.
+        self._streamed_text = ""
         self.answered = False
         self.final_state = {}
 
@@ -267,6 +275,11 @@ class InterviewAgent:
                 self._record_usage(message)
                 text = message.text
                 if text:
+                    # Accumulated before the yield, not after: the consumer may
+                    # abandon the generator at this exact point (the page polls
+                    # the guardrail between tokens), and text already streamed
+                    # has already been paid for.
+                    self._streamed_text += text
                     yield text
         finally:
             self._finish(system_prompt, messages)
@@ -307,7 +320,9 @@ class InterviewAgent:
         return turn_cost(
             pricing,
             estimate_prompt_tokens(system_prompt, messages),
-            estimate_text_tokens(self.answer_text),
+            # What was streamed, not what was kept. A blocked turn stores no
+            # answer and still cost the provider every token it emitted.
+            estimate_text_tokens(self._streamed_text or self.answer_text),
         )
 
     def _finish(self, system_prompt="", messages=()):

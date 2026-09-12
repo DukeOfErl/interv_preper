@@ -629,3 +629,45 @@ def test_hops_that_report_no_cost_are_priced_rather_than_billed_at_nothing(
     # one's reported cent. The old behaviour returned exactly 0.01.
     assert cost > 0.01, "the unreported hop was billed at nothing"
     assert cost == pytest.approx(2.01, rel=1e-3)
+
+
+def test_an_abandoned_turn_prices_the_output_it_actually_streamed(monkeypatch):
+    """The residual half of R22.4, found by review after the first half shipped.
+
+    The input side was fixed: a blocked turn's prompt tokens are priced and
+    recorded. The output side still read as free, because rung three prices
+    `answer_text` — which `_finish` takes from the graph's *final state*, and a
+    turn the page abandons never reaches that state. So the turn was billed for
+    every token it emitted and charged for an empty string.
+
+    The requirement this pins is not "the number is 0.0011"; it is that output
+    already streamed is output already paid for. Asserted as more than the
+    input-only cost rather than against a figure read off a run.
+    """
+    monkeypatch.setattr(
+        "interview_prep.agent.price_of",
+        lambda model, api_key: ModelPricing(
+            model="m",
+            prompt_price=0.0,
+            completion_price=1e-6,
+            source="OpenRouter",
+        ),
+    )
+    paid, ledger = budget()
+    model = ScriptedModel(
+        replies=[
+            # Reports neither a cost nor token counts, so pricing falls to
+            # rung three — the estimate.
+            AIMessage(content="x" * 4000)
+        ]
+    )
+    agent = InterviewAgent(
+        api_key="k", model="m", chat_model=model, identity=IDENTITY, budget=paid
+    )
+    for _token in agent.stream_reply("sys", [{"role": "user", "content": "go"}]):
+        break  # what a jailbreak verdict makes the page do
+
+    # Input is priced at zero here, so anything recorded is the output side.
+    assert ledger.total(IDENTITY.email) > 0.0, (
+        "output that was streamed and billed was priced at nothing"
+    )

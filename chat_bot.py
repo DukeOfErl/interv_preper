@@ -9,6 +9,7 @@ and drives the Streamlit chat loop.
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 
 import streamlit as st
@@ -761,6 +762,13 @@ def _run() -> None:
             estimate_prompt_tokens(system_prompt, messages),
             ASSUMED_REPLY_TOKENS,
         )
+    # Show the figure the cap was decided against, not the one that was
+    # missing. R10.6 shows "N/A" before any completed exchange, which was
+    # honest while nothing depended on it — but the cap now refuses turns on
+    # the strength of the recomputed estimate above, and a user refused on a
+    # number the sidebar declines to show cannot check the arithmetic or
+    # understand why their next turn will not run (R22.22).
+    spend = replace(spend, next_estimate=estimate)
     budget = current_budget(estimate)
     decision = check_budget(
         identity, ledger=budget.ledger, cap=budget.cap, estimate=budget.estimate

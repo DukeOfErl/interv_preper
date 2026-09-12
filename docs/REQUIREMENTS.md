@@ -1,6 +1,6 @@
 # Requirements — Interview Preparation Chatbot
 
-A behavioral specification of the app, written so it could be refactored or re-implemented from scratch. It describes *what* the app does, not *how* the current code does it (implementation notes appear only where the behavior depends on them). Sections 1–15 describe the **current app** (§15 is document RAG, implemented — except R15.14, still pending); section 16 is **planned scope** (web-sourced knowledge) and is written as target behavior; sections 17-19 (curated knowledge base, evaluation cards, GitHub portfolio tools over MCP) and sections 20-21 (roles and permissions, authentication and authorization) describe the **current app**; section 22 (per-identity spend cap) is **planned scope**, written as target behavior.
+A behavioral specification of the app, written so it could be refactored or re-implemented from scratch. It describes *what* the app does, not *how* the current code does it (implementation notes appear only where the behavior depends on them). Sections 1–15 describe the **current app** (§15 is document RAG, implemented — except R15.14, still pending); section 16 is **planned scope** (web-sourced knowledge) and is written as target behavior; sections 17-19 (curated knowledge base, evaluation cards, GitHub portfolio tools over MCP) and and sections 20-22 (roles and permissions, authentication and authorization, the per-identity spend cap) describe the **current app**.
 
 ## 1. Purpose
 
@@ -316,4 +316,5 @@ The application code is a thin shell around both.
 
 - **R22.17** (amends **R10.1**) The sidebar's spend display gains the identity's remaining budget. What a `dev` sees is unchanged; an uncapped role has nothing to show.
 - **R22.18** (amends **R10.4**) Accrued spend stops being session-scoped. `total_cost` in session state becomes a display of this turn's contribution to a durable per-identity total, not the total itself.
+- **R22.22** (amends **R10.6**) The next-prompt estimate shown in the sidebar is **the figure the cap was decided against**, not "N/A". R10.6 showed nothing before a completed exchange existed, which was honest while the estimate was only a courtesy — but the cap now refuses turns on the strength of a figure computed for exactly that case (the composed prompt and history at the active model's rate). A user refused on a number the app declines to show can neither check the arithmetic nor understand why their next turn will not run, and an operator cannot tell a cap that is working from one that is misreading the model's price.
 - **R22.19** (satisfies **R21.19**) Per-identity audit of spend was deferred pending this decision. A durable per-email ledger *is* that audit, and R21.19 is met by R22.1 rather than needing its own work.
