@@ -134,6 +134,21 @@ The email address the app trusts is the **verified** email claim from the provid
 
 Why a hosted database rather than the SQLite file the knowledge base uses: Streamlit Community Cloud recycles containers freely, so a local total silently resets to zero, and two containers may serve the same person at once. ADR-0210 also records, plainly, that OpenRouter's provisioned per-user keys would be the better mechanism, and why this one was chosen anyway.
 
+## Deploying
+
+`docs/DEPLOYMENT.md` covers deployment to Streamlit Community Cloud: the
+settings that cannot be changed after the first deploy, where the secrets go
+(and the TOML ordering that decides whether the API key is found at all), the
+`redirect_uri` chicken-and-egg with Google, the Supabase pooler and column
+precision the spend cap depends on, and what a container recycle does and does
+not reset.
+
+Two things there are worth knowing before you start: **the free Supabase tier
+pauses after 7 days idle**, and because the spend cap fails closed (R22.12) a
+paused database means the app serves nobody until it is woken. And the
+**spend ledger is the one thing that survives a recycle** — that is what WP4
+was for.
+
 ## Run
 
 ```bash

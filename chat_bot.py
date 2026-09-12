@@ -124,6 +124,27 @@ class MissingLedger:
         raise LedgerUnavailable("no [spend] block in secrets.toml")
 
 
+def secret_api_key():
+    """The OpenRouter key from Streamlit secrets, for a Cloud deployment.
+
+    There is no `.env` on Streamlit Cloud, so the key is pasted into the app's
+    secrets instead. Streamlit promotes **top-level scalar** secrets into
+    `os.environ` (verified in 1.58), which is why `config.load_api_key` finds
+    it there at all — but only once secrets have actually been loaded, and only
+    for keys written above every `[section]` header, since anything after one
+    belongs to that section in TOML.
+
+    Both of those are silent when wrong, and wrong *only when deployed*: a
+    local run has `.env` and never notices. So the key is read directly here as
+    well, rather than leaving it to depend on this function being called after
+    something else happened to touch `st.secrets` first.
+    """
+    try:
+        return st.secrets["OPENROUTER_API_KEY"]
+    except Exception:
+        return None
+
+
 def spend_settings():
     """The operator's `[spend]` configuration, or None (R22.16)."""
     try:
@@ -624,7 +645,7 @@ def _run() -> None:
 
     # Prefer a key from the environment/.env; otherwise let the user paste one
     # into the sidebar (kept in session only). Fail fast until we have a key.
-    env_key = load_api_key()
+    env_key = load_api_key() or secret_api_key()
     key_from_env = bool(env_key)
     api_key = env_key or render_api_key_input()
     if not api_key:
