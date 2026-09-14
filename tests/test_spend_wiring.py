@@ -27,9 +27,11 @@ import streamlit as st
 from streamlit import config as st_config
 from streamlit.testing.v1 import AppTest
 
+from interview_prep.authorization import Identity
+from interview_prep.permissions import Role
 from interview_prep import context, ledger_postgres
 from interview_prep.config import DEFAULT_EMBEDDING_MODEL
-from interview_prep.spend import InMemoryLedger, LedgerUnavailable
+from interview_prep.spend import InMemoryLedger, LedgerUnavailable, check_budget
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "chat_bot.py"
 UNUSABLE_KEY = "sk-not-a-real-key-for-tests"
@@ -319,3 +321,92 @@ def test_an_unconfigured_ledger_refuses_rather_than_uncapping(offline, tmp_path)
     app = run_app(offline, USER, DownLedger())
     assert len(app.get("chat_input")) == 0
     assert "ledger" in errors(app).lower()
+
+
+# --- the buffered ledger survives the run that failed to flush --------------
+
+
+def test_spend_held_by_a_failed_flush_survives_into_the_next_run(monkeypatch):
+    """The wiring half of `BufferedLedger`'s retry, which the object's own test
+    cannot reach.
+
+    `BufferedLedger.flush` keeps the pending amount when a write fails, so the
+    next flush can retry it — and `test_a_failed_flush_keeps_the_spend_rather_than_losing_it`
+    proves that on the object. But `current_budget` built a *fresh* buffer on
+    every run, so the run that would have retried started with an empty
+    `_pending` and the amount was gone. The unit test passed, the property did
+    not hold, and one transient pooler error under-counted a turn permanently.
+
+    This asserts the seam instead: the same buffer is carried across runs, and
+    what it is still owed goes with it.
+    """
+    import chat_bot
+
+    store = _UnwritableStore()
+    monkeypatch.setattr(chat_bot, "PostgresLedger", lambda dsn: store)
+    monkeypatch.setattr(
+        chat_bot, "spend_settings", lambda: {"connection_string": "x", "cap_usd": 5.0}
+    )
+
+    first = chat_bot.current_budget(estimate=0.01)
+    first.record(_IDENTITY, 0.40)
+    assert first.ledger.flush() is False, "the store refused, as arranged"
+    assert first.ledger.pending_total == pytest.approx(0.40)
+
+    # A new run asks for a budget again.
+    second = chat_bot.current_budget(estimate=0.01)
+    assert second.ledger is first.ledger, "the buffer must be reused, not rebuilt"
+    assert second.ledger.pending_total == pytest.approx(0.40), (
+        "spend held by the failed flush was dropped at the run boundary"
+    )
+
+    # And when the store recovers, the held amount lands.
+    store.writable = True
+    assert second.ledger.flush() is True
+    assert store.totals["candidate@example.com"] == pytest.approx(0.40)
+
+
+class _UnwritableStore:
+    """A store that reads fine and refuses every write until told otherwise."""
+
+    def __init__(self):
+        self.totals = {}
+        self.writable = False
+
+    def total(self, email):
+        return self.totals.get(email, 0.0)
+
+    def record(self, email, amount):
+        if not self.writable:
+            raise LedgerUnavailable("pooler said no")
+        self.totals[email] = self.totals.get(email, 0.0) + amount
+
+
+_IDENTITY = Identity(email="candidate@example.com", role=Role.USER)
+
+
+def test_an_unreadable_cap_is_worded_as_a_deployment_fault(monkeypatch):
+    """R22.13, by the back door.
+
+    `cap_usd` missing or non-numeric used to set `cap = 0.0` and nothing else,
+    so `decide` refused with "at_cap" and the page told a user who had spent
+    nothing that they had reached their spend limit and should ask the operator
+    for more. The operator's typo, reported as the user's fault, sending them
+    to argue about a budget that does not exist.
+    """
+    import chat_bot
+
+    monkeypatch.setattr(chat_bot, "PostgresLedger", lambda dsn: _UnwritableStore())
+    monkeypatch.setattr(
+        chat_bot,
+        "spend_settings",
+        lambda: {"connection_string": "x", "cap_usd": "five dollars"},
+    )
+    budget = chat_bot.current_budget(estimate=0.01)
+    decision = check_budget(
+        _IDENTITY, ledger=budget.ledger, cap=budget.cap, estimate=budget.estimate
+    )
+    assert not decision.allowed
+    assert decision.reason == "ledger_unavailable", (
+        "a misconfigured cap must not read as the user having overspent"
+    )

@@ -31,7 +31,21 @@ class ModelPricing:
 
     @property
     def is_known(self) -> bool:
-        return self.source == "OpenRouter"
+        """Whether this model can actually be priced.
+
+        Both halves matter. The catalog is the source, *and* it has to have
+        produced a rate: `_to_price` coerces a missing or non-numeric
+        `prompt`/`completion` to 0.0, so an entry that exists but publishes no
+        pricing used to come back "known" at zero. Downstream that is worse
+        than "unknown" — `JailbreakGuard._scan_estimate` skips
+        `refuse_unpriceable` on a known price and returns $0.00, and `decide`
+        admits a zero estimate against any non-empty budget. A user with one
+        cent left could then launch the 5,668-call scan the estimate exists to
+        refuse.
+        """
+        return self.source == "OpenRouter" and bool(
+            self.prompt_price or self.completion_price
+        )
 
 
 @dataclass(frozen=True)

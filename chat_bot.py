@@ -156,11 +156,13 @@ def spend_settings():
 def current_budget(estimate):
     """The budget port's adapter: secrets in, one turn's `Budget` out.
 
-    Built fresh every run rather than cached in session state, deliberately.
-    The construction opens no connection, the allowlist is already re-read per
-    run for the same reason (R21.7), and an operator who lowers the cap or
-    fixes a connection string should see it take effect on the next
-    interaction rather than after a restart.
+    The *settings* are read fresh every run — the allowlist already is, for the
+    same reason (R21.7), and an operator who lowers the cap or fixes a
+    connection string should see it take effect on the next interaction rather
+    than after a restart. The construction opens no connection.
+
+    The *buffer* is not rebuilt, which is the one thing here that is not
+    stateless; see below for why, and what it costs.
     """
     settings = spend_settings()
     try:
@@ -174,18 +176,39 @@ def current_budget(estimate):
         try:
             cap = float(settings["cap_usd"])
         except Exception:
-            # A cap that cannot be read is a cap of nothing: it refuses every
-            # capped role and leaves `dev` (R22.9) able to sign in and fix it.
+            # A cap that cannot be read is an operator's misconfiguration, not
+            # a user's overspending — and `cap = 0.0` alone said the latter,
+            # because `decide` then refuses with "at_cap" and the page tells a
+            # user who has spent nothing that they have reached their limit and
+            # should ask the operator for more. That is the exact conflation
+            # R22.13 exists to prevent, arriving by the back door.
+            #
+            # A `[spend]` block with no usable cap is as misconfigured as one
+            # with no usable connection string, so it takes the same path: the
+            # refusal is worded as the deployment fault it is, and still fails
+            # closed for everyone but `dev`, who can sign in and fix it.
+            store = MissingLedger()
             cap = 0.0
-    # Buffered, and rebuilt every run so no read outlives the turn it was made
-    # for. Without this every paid client's guard is its own round trip and
+    # Buffered: without it every paid client's guard is its own round trip and
     # every recorded cost is another — five or so per chat turn, and one per
     # *window* on a document scan, which measured at roughly 550 connections
     # for a 2 MB upload. A free-tier pooler refuses long before that, and
-    # because the ledger fails closed (R22.12) the refusal takes the whole app
+    # because the ledger fails closed (R22.12) that refusal takes the whole app
     # down rather than merely slowing it. `main` flushes it in a `finally`.
-    ledger = BufferedLedger(store)
-    st.session_state[SPEND_BUFFER_KEY] = ledger
+    #
+    # Reused across runs rather than rebuilt, which is the correction to a real
+    # defect: `BufferedLedger` keeps the amount from a flush that failed so the
+    # next one can retry it, and a fresh buffer each run threw that away before
+    # the retry could ever happen. The object's own test proved the retention
+    # while the wiring defeated it. `rebind` opens the new run by forgetting
+    # what was *read* — R22.11 makes the store the authority and another
+    # container may have moved the number — while keeping what is still owed.
+    ledger = st.session_state.get(SPEND_BUFFER_KEY)
+    if isinstance(ledger, BufferedLedger):
+        ledger.rebind(store)
+    else:
+        ledger = BufferedLedger(store)
+        st.session_state[SPEND_BUFFER_KEY] = ledger
     return Budget(ledger=ledger, cap=cap, estimate=estimate)
 
 

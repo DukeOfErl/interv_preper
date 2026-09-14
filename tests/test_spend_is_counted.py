@@ -671,3 +671,50 @@ def test_an_abandoned_turn_prices_the_output_it_actually_streamed(monkeypatch):
     assert ledger.total(IDENTITY.email) > 0.0, (
         "output that was streamed and billed was priced at nothing"
     )
+
+
+def test_a_turn_where_no_hop_reports_cost_is_priced_from_every_hop(monkeypatch):
+    """The other half of the multi-hop under-count, found by the second review.
+
+    The mixed case — some hops priced, some silent — was fixed first. This is
+    the all-silent case, and it took a different path: with `last_cost` None the
+    ladder fell to `last_usage`, which `_record_usage` *replaces* on every hop.
+    So a three-hop turn was billed for the third hop and the first two were
+    free. It is the common shape whenever `extra_body={"usage": …}` is dropped
+    or a provider omits cost entirely.
+    """
+    monkeypatch.setattr(
+        "interview_prep.agent.price_of",
+        lambda model, api_key: ModelPricing(
+            model="m",
+            prompt_price=1e-6,
+            completion_price=1e-6,
+            source="OpenRouter",
+        ),
+    )
+    paid, _ = budget()
+    agent = InterviewAgent(
+        api_key="k",
+        model="m",
+        chat_model=ScriptedModel(replies=[]),
+        identity=IDENTITY,
+        budget=paid,
+    )
+    agent._reset()
+
+    # Three hops, none reporting a cost, a million tokens each way apiece.
+    for _ in range(3):
+        agent._record_usage(
+            SimpleNamespace(
+                usage_metadata={
+                    "input_tokens": 1_000_000,
+                    "output_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                },
+                response_metadata={},
+            )
+        )
+
+    cost = agent._turn_cost("sys", [{"role": "user", "content": "go"}])
+    # $2.00 per hop, three hops. Pricing from `last_usage` gives $2.00.
+    assert cost == pytest.approx(6.0, rel=1e-3), "hops before the last were free"

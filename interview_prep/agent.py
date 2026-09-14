@@ -311,6 +311,19 @@ class InterviewAgent:
                 self._unpriced_prompt_tokens,
                 self._unpriced_completion_tokens,
             )
+        if unpriced:
+            # No hop reported a cost, so every hop's tokens are in here. Not
+            # `last_usage`, which `_record_usage` *replaces* per hop and which
+            # therefore describes only the final one — a three-hop tool turn
+            # priced from it is billed for a third of itself. The mixed case
+            # returned above; this is the all-silent one, and it is the common
+            # shape when `extra_body={"usage": …}` is dropped or a provider
+            # simply omits cost.
+            return turn_cost(
+                pricing,
+                self._unpriced_prompt_tokens,
+                self._unpriced_completion_tokens,
+            )
         if self.last_usage is not None:
             return turn_cost(
                 pricing,

@@ -26,6 +26,7 @@ look right and hold nothing:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -399,6 +400,27 @@ class BufferedLedger:
         self._inner = inner
         self._read = {}
         self._pending = {}
+        # Spend is reported from more threads than the one running the script:
+        # a document scan classifies windows on a pool, and the chat guardrail
+        # bills from its own worker while the agent bills from the script
+        # thread. `d[k] = d.get(k, 0) + x` is a read-modify-write and loses
+        # increments across a thread switch — silently, and downwards.
+        self._lock = threading.Lock()
+
+    def rebind(self, inner) -> None:
+        """Begin a new run: forget what was read, keep what is still owed.
+
+        The read cache must not outlive its run — R22.11 makes the store the
+        authority and another container may have moved the number. What must
+        outlive it is `_pending`: a flush that failed keeps its amount so the
+        next one can retry, and building a fresh `BufferedLedger` each run
+        threw that away before the retry could ever happen. The object's own
+        test proved the retention; the wiring defeated it, which is the shape
+        of defect this codebase keeps producing.
+        """
+        with self._lock:
+            self._inner = inner
+            self._read.clear()
 
     def total(self, email) -> float:
         key = normalise_email(email)
@@ -413,31 +435,40 @@ class BufferedLedger:
         if not amount:
             return
         key = normalise_email(email)
-        self._pending[key] = self._pending.get(key, 0.0) + amount
+        with self._lock:
+            self._pending[key] = self._pending.get(key, 0.0) + amount
 
     def flush(self) -> bool:
         """Write what is pending. False if any of it did not land."""
         landed = True
-        for key, amount in list(self._pending.items()):
-            if not amount:
+        # Taken under the lock and removed in the same breath, so spend
+        # recorded while a write is in flight is not deleted unwritten by the
+        # `del` below. Anything that arrives after this point simply waits for
+        # the next flush.
+        with self._lock:
+            claimed = {k: v for k, v in self._pending.items() if v}
+            for key in list(self._pending):
                 del self._pending[key]
-                continue
+        for key, amount in claimed.items():
             try:
                 self._inner.record(key, amount)
             except Exception:
-                # Kept, not dropped. Retried at the next flush of this run's
-                # successor, and the store is read again before the next turn
-                # is allowed, so an outage still stops spending within a turn.
+                # Kept, not dropped: put back for the next flush. The store
+                # is read again before the next turn is allowed, so an outage
+                # still stops the spending within a turn.
+                with self._lock:
+                    self._pending[key] = self._pending.get(key, 0.0) + amount
                 landed = False
                 continue
-            del self._pending[key]
-            self._read[key] = self._read.get(key, 0.0) + amount
+            with self._lock:
+                self._read[key] = self._read.get(key, 0.0) + amount
         return landed
 
     @property
     def pending_total(self) -> float:
         """Unflushed spend across every identity — what a crash would lose."""
-        return sum(self._pending.values())
+        with self._lock:
+            return sum(self._pending.values())
 
 
 class InMemoryLedger:
