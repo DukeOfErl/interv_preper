@@ -1,27 +1,27 @@
 # Interview Prep
 
-**A mock-interview chatbot that reads your actual resume, your actual job ad, and your actual GitHub — then interviews you on them and scores every answer.**
+A basic mock-interview chatbot. Upload your resume and a job ad, and it runs an interview one question at a time, scoring each answer against a fixed rubric.
 
-Most interview practice is generic. This one asks about the gap between the role you want and the resume you have, probes the project you shipped last year, and tells you where your answer was weak and why.
+![The interview tab: interviewer and effort selectors, running spend, an ingested job ad, and the interview in progress](docs/images/interview.png)
 
-<!-- Once deployed, add the link and a screenshot or two here — a portfolio README earns
-     far more from one image of a scored answer than from another paragraph:
-     ![The interview tab](docs/images/interview.png) -->
+The interviewing itself is straightforward. The part of this project worth reading is what sits behind it — sign-in and an allowlist, a per-identity spend cap backed by Postgres, fail-closed screening of everything the model is shown, and a test suite written on the assumption that controls lie about working.
+
+<!-- Add the live app URL here once deployed. -->
 
 ## What a session looks like
 
 1. **Drop in your documents.** Resume, job ad, cover letter — PDF, DOCX, TXT or MD. Or skip it and answer a few intake questions instead; uploading is an accelerator, never a gate.
-2. **Get interviewed.** One question at a time, in role, with follow-ups that pick at the things you glossed over.
+2. **Get interviewed.** One question at a time, in role, with follow-ups.
 3. **Get scored.** Every answer is rated on six dimensions — relevance, structure, specificity, evidence, judgment, communication — with written feedback on what would have made it stronger.
 4. **Compare at a glance.** Each scored answer becomes a card in the **Evaluations** tab, with running per-dimension averages, so you can see whether you are actually improving across the session or just talking more.
 
 ## What it can draw on
 
-**Your documents.** Uploaded files are parsed, safety-screened, chunked and embedded, then retrieved per turn — so questions come from *your* projects and probe gaps between *your* resume and *the* job ad. The **Last Retrieval** panel shows exactly which excerpts an answer was grounded in.
+**Your documents.** Uploaded files are parsed, safety-screened, chunked and embedded, then retrieved per turn — so questions can draw on your own projects and on the job ad rather than on a generic script. The **Last Retrieval** panel shows exactly which excerpts an answer was grounded in.
 
 **The web, when you ask.** Ask about the company's recent news, current tooling for the role, or salary data and the interviewer will research it — returning cited bullets with clickable sources. **It never searches on its own**: only when you ask, or after you say yes to its offer.
 
-**Your GitHub.** Share a username and it will read your public repositories — READMEs and real code — then ask interview questions about work you actually did. It offers first and browses only with your say-so.
+**Your GitHub.** Share a username and it will read your public repositories — READMEs and real code — then ask questions about code you wrote. It offers first and browses only with your say-so.
 
 **A curated coaching knowledge base.** Interview best practice, question banks tagged by role and seniority, competency expectations, bias-reduction guidance, and the legal limits on what an interviewer may ask. These shape the questions and the scoring, and they persist across sessions.
 
@@ -31,7 +31,7 @@ Most interview practice is generic. This one asks about the gap between the role
 
 # Under the hood
 
-The interesting part of this project is not the chat loop. It is what had to be true for the chat loop to be trustworthy.
+The chat loop is the small part. Most of the work went into what had to be true before it was safe to let anyone else use it.
 
 ## Stack
 
