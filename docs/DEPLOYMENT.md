@@ -126,6 +126,18 @@ size it is not worth engineering around. If the knowledge base grows by an
 order of magnitude or two, attribute the sync to the operator instead of to
 whoever happened to arrive first.
 
+## The live deployment
+
+Deployed at <https://interv-preper.streamlit.app/> from `DukeOfErl/interv_preper`,
+branch `main`, Python 3.12, main file `chat_bot.py`.
+
+Both `redirect_uri` snags in this document were hit on the first deploy, in the
+order written: the Cloud secret still carried the `PLACEHOLDER` host, and once
+that was corrected the real URI was not yet registered with Google. Google's
+error page is the only place that says which — **click "see error details" and
+read the `redirect_uri=` value it reports**. That single string identifies which
+side is wrong and turns a guessing game into one edit.
+
 ## Pre-flight checklist
 
 - [ ] Python 3.12 selected in Advanced settings (before deploying)
