@@ -10,7 +10,125 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
-Nothing yet.
+## [0.3.0] - 2026-09-14
+
+The version where the app stopped serving anyone who found the URL, and
+stopped spending without a ceiling. Three questions now stand between a visitor
+and a model call — who are you, may you be here, and how much may you spend —
+and each is answered by a separate module, because they fail in different
+directions and collapsing them would make "nobody signed in" and "signed in
+with a small budget" the same state.
+
+The theme of the work underneath is narrower than the feature: **a control that
+reports success without holding is worse than no control.** Four of the six
+paid clients were spending the operator's credit and reporting none of it; a
+cap fed by the other two would have looked healthy and counted a third of the
+bill. The same shape turned up in a guard that was present and never reached, a
+retry that was tested on an object whose wiring discarded it, and a column
+precision that rounded the smallest charges to zero after the code had been
+fixed to record them.
+
+### Added
+- **A per-identity spend cap.** Each authorized address has a lifetime USD
+  budget, held in an external Postgres and read before every turn; the turn is
+  refused when the *next-prompt estimate* no longer fits in what is left, so
+  the cap is not crossed by the turn that discovers it. `dev` is not capped.
+  Being at the limit and being unable to reach the ledger are different
+  refusals with different wording — the second is a deployment fault the user
+  can neither cause nor fix — and the sidebar shows a capped role what remains.
+  An unreachable **or unconfigured** ledger refuses every turn, deliberately:
+  the alternative uncaps every account at the moment nobody is watching.
+  Requires a `[spend]` block in `.streamlit/secrets.toml` and the new `psycopg`
+  dependency; see the README and [ADR-0210](docs/decisions/0210-hosted-postgres-ledger-for-the-spend-cap.md).
+- **All six paid clients now report what they spend.** The pre-send guardrail,
+  the query condenser and the two embedding paths previously spent the
+  operator's credit and reported none of it, so any accounting built on the
+  other two counted a third of the bill. Each call is priced down a three-rung
+  ladder (R22.3): OpenRouter's reported cost, else the token counts it reported
+  priced from the catalog, else estimated tokens priced the same way. The
+  embedding paths can only ever reach the bottom rung — LangChain returns
+  vectors and keeps the response — and their price comes from the per-model
+  `/endpoints` route, **not** from `/models`, which is the chat catalog and
+  lists none of this app's embedding models. Reading the price from the wrong
+  route is why those two paths recorded exactly $0.00 in an earlier draft of
+  this work.
+- **Spend that produced no output is still recorded.** A turn the safety
+  guardrail blocks, or one that dies on a provider error mid-stream, has
+  already cost the operator every hop that ran. Each client now records from
+  the operation that spent, on every exit path — including an interview stream
+  the page abandons the instant a jailbreak verdict lands, which previously
+  spent dollars and recorded nothing.
+- **Known and accepted: a pricing outage narrows the cap.** Prices come from
+  OpenRouter's catalog, and when it cannot be read every rung of the cost
+  ladder below the provider's own reported figure returns zero — so the four
+  completion clients keep counting (their cost is reported with the response
+  and needs no catalog) while the two embedding paths record nothing. For the
+  duration of such an outage the cap counts four of six. This is R22.3's named
+  hole rather than a new defect, the amounts are microdollars, and it is
+  bounded by the outage; it is written down because a hole that is documented
+  is a decision and the same hole undocumented is a bug waiting to be found.
+  What is *not* allowed to happen is an unknown price reading as free: an
+  estimate the app cannot price is treated as unmeasured, and a document scan
+  — the one operation whose fan-out is unbounded — is refused outright rather
+  than admitted on the turn-sized fallback, with its own wording so a user
+  during an outage is not told they overspent.
+- **A document scan is checked against its own size.** Screening an upload
+  makes one classifier call per overlapping window, so its cost scales with the
+  file rather than with the conversation; it is now admitted against an
+  estimate of the whole scan instead of against the next chat prompt's
+  estimate, which is how a $5 cap could have paid for a $24 upload.
+- **Sign-in is required, and signing in is not enough.** Authentication is
+  Streamlit's native OIDC (`st.login` / `st.user` / `st.logout`, requiring
+  the new `Authlib` dependency), configured through an `[auth]` block in
+  `.streamlit/secrets.toml`. An unauthenticated visitor gets a sign-in page
+  and nothing else — no chat box, no uploader, no turn. The email the app
+  trusts is the provider's **verified** claim, and an expired token is logged
+  out on the next run (ADR-0200).
+- **An explicit allowlist decides who is served.** A separate `[roles]` table
+  in the same secrets file maps authorized email → role (`dev` or `user`):
+  presence is authorization, **absence is refusal**. Signing in with Google
+  proves an address and nothing more, while every turn spends the operator's
+  own OpenRouter credit — so a valid login that is not on the list is refused,
+  told which account it used, and offered sign-out. A typo'd role name keeps
+  access and loses privilege, but an absent or unreadable table authorizes
+  **nobody, the operator included** — deliberately, because the alternative is
+  a deployment that quietly admits the world to a funded API key. **Operators
+  must configure both blocks before the app serves anyone**; see
+  `.streamlit/secrets.toml.example` and the README (ADR-0200).
+- **The refusal is enforced where the money is spent**, not only on the page:
+  all six paid clients — the agent, the guardrail, the query condenser, the
+  web researcher and the two embedding sites — require an authorized identity
+  to be handed to them and raise rather than call a model without one
+  (ADR-0200).
+- **Roles.** The sidebar's **Developer** and **Warnings** tabs are shown only
+  to a `dev` role, taken from the allowlist above; everyone else sees Interview
+  and Evaluations. Warnings you can act on — a rejected upload, a retrieval
+  fallback, an unverified reference — still appear in the chat itself for every
+  role (ADR-0190).
+
+### Changed
+- **A deployment is no longer as private as its URL.** The earlier statement
+  that this app has no authentication is withdrawn: access now requires a
+  Google sign-in **and** an entry in the operator's allowlist.
+- The interviewer's turn now runs on **LangChain's agent** rather than a
+  hand-rolled tool loop (ADR-0170). Same tools, same budget, same safeguards —
+  but tool progress ("Checking GitHub: …") is now reliable, where it could
+  previously stall and report failures that had not happened.
+- Repository **listings and search results are now safety-scanned** before the
+  interviewer reads them, like fetched files already were. File and folder
+  names are written by whoever owns the repository, and the interviewer reads
+  them as literally as it reads code. A blocked listing is reported in the
+  Warnings tab and the interviewer asks you to name a file instead
+  (ADR-0150).
+- The wait before a reply starts streaming is no longer a bare spinner: the
+  assistant slot shows *Reasoning with low/medium/high effort…* (or *Waiting
+  for the model's reply…* for non-reasoning models) until the first token
+  arrives.
+
+### Removed
+- **`INTERVIEW_PREP_ROLE` is gone**, along with the environment/secrets lookup
+  behind it. It was configuration standing in for authentication; the `[roles]`
+  allowlist replaces it. Setting the old variable now does nothing at all.
 
 ## [0.2.0] - 2026-08-04
 

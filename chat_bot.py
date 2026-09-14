@@ -6,13 +6,18 @@ This module only wires together the pieces in the ``interview_prep`` package
 and drives the Streamlit chat loop.
 """
 
+import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 
 import streamlit as st
 from openai import APIError, AuthenticationError
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from interview_prep.config import (
+    ASSUMED_REPLY_TOKENS,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MODEL,
     DEFAULT_REASONING_EFFORT,
@@ -20,7 +25,6 @@ from interview_prep.config import (
     GUARDRAIL_DOC_MODEL,
     KNOWLEDGEBASE_DB_PATH,
     KNOWLEDGEBASE_DIR,
-    QUERY_REWRITE_HISTORY_TURNS,
     REASONING_EFFORTS,
     load_api_key,
     load_github_pat,
@@ -37,6 +41,7 @@ from interview_prep.github_mcp import (
     unquoted_code_blocks,
     unverified_references,
 )
+from interview_prep.grounding import ground_turn
 from interview_prep.guardrails import JailbreakGuard
 from interview_prep.ingest import (
     DocumentParseError,
@@ -46,7 +51,7 @@ from interview_prep.ingest import (
     should_ingest,
 )
 from interview_prep.knowledgebase import KnowledgeBase
-from interview_prep.llm import InterviewLLM
+from interview_prep.agent import InterviewAgent
 from interview_prep.pricing import ChatSpend, get_model_pricing, turn_cost
 from interview_prep.prompts import (
     PromptLibrary,
@@ -54,12 +59,20 @@ from interview_prep.prompts import (
     discover_sources,
 )
 from interview_prep.query_rewrite import QueryCondenser
-from interview_prep.retrieval import (
-    DocumentIndex,
-    fill_retrieved_context,
-    format_context_block,
+from interview_prep.retrieval import DocumentIndex
+from interview_prep.authorization import ANONYMOUS, authorize
+from interview_prep.ledger_postgres import PostgresLedger
+from interview_prep.permissions import Permission, has
+from interview_prep.spend import (
+    UNMEASURED_TURN_USD,
+    BufferedLedger,
+    Budget,
+    LedgerUnavailable,
+    OverBudget,
+    check_budget,
 )
-from interview_prep.tools import ToolBox, looks_like_feedback
+from interview_prep.policy import ContentPolicy
+from interview_prep.tools import build_tools, looks_like_feedback
 from interview_prep.web_research import WebResearcher
 from interview_prep.ui import (
     warning_message,
@@ -83,6 +96,370 @@ from interview_prep.ui import (
 )
 
 
+ROLE_TABLE_KEY = "roles"
+SPEND_KEY = "spend"
+#: Where this run's `BufferedLedger` waits for `main`'s flush.
+SPEND_BUFFER_KEY = "_spend_buffer"
+
+
+class MissingLedger:
+    """The store for a deployment that configured none.
+
+    Not an uncapped app. R22.12 fails closed on a ledger that cannot be read,
+    and a `[spend]` block that was never written is a ledger that cannot be
+    read — the same refusal an unusable `[roles]` table already produces
+    (R21.10), for the same reason: a deployment serving nobody is fixed in
+    minutes, while one silently uncapping every account produces only a bill.
+
+    It is a *ledger*, not a special case in the policy, so the page has exactly
+    one refusal path to render and `spend.py` never learns that Streamlit
+    secrets exist.
+    """
+
+    def total(self, email):
+        raise LedgerUnavailable(
+            "no [spend] block in secrets.toml, so spending cannot be counted"
+        )
+
+    def record(self, email, amount):
+        raise LedgerUnavailable("no [spend] block in secrets.toml")
+
+
+def secret_api_key():
+    """The OpenRouter key from Streamlit secrets, for a Cloud deployment.
+
+    There is no `.env` on Streamlit Cloud, so the key is pasted into the app's
+    secrets instead. Streamlit promotes **top-level scalar** secrets into
+    `os.environ` (verified in 1.58), which is why `config.load_api_key` finds
+    it there at all — but only once secrets have actually been loaded, and only
+    for keys written above every `[section]` header, since anything after one
+    belongs to that section in TOML.
+
+    Both of those are silent when wrong, and wrong *only when deployed*: a
+    local run has `.env` and never notices. So the key is read directly here as
+    well, rather than leaving it to depend on this function being called after
+    something else happened to touch `st.secrets` first.
+    """
+    try:
+        return st.secrets["OPENROUTER_API_KEY"]
+    except Exception:
+        return None
+
+
+def spend_settings():
+    """The operator's `[spend]` configuration, or None (R22.16)."""
+    try:
+        return st.secrets[SPEND_KEY]
+    except Exception:
+        return None
+
+
+def current_budget(estimate):
+    """The budget port's adapter: secrets in, one turn's `Budget` out.
+
+    The *settings* are read fresh every run — the allowlist already is, for the
+    same reason (R21.7), and an operator who lowers the cap or fixes a
+    connection string should see it take effect on the next interaction rather
+    than after a restart. The construction opens no connection.
+
+    The *buffer* is not rebuilt, which is the one thing here that is not
+    stateless; see below for why, and what it costs.
+    """
+    settings = spend_settings()
+    try:
+        store = PostgresLedger(settings["connection_string"])
+    except Exception:
+        # Absent, unreadable, or missing its connection string — all the same
+        # fact to a user, and all fail closed.
+        store = MissingLedger()
+        cap = 0.0
+    else:
+        try:
+            cap = float(settings["cap_usd"])
+        except Exception:
+            # A cap that cannot be read is an operator's misconfiguration, not
+            # a user's overspending — and `cap = 0.0` alone said the latter,
+            # because `decide` then refuses with "at_cap" and the page tells a
+            # user who has spent nothing that they have reached their limit and
+            # should ask the operator for more. That is the exact conflation
+            # R22.13 exists to prevent, arriving by the back door.
+            #
+            # A `[spend]` block with no usable cap is as misconfigured as one
+            # with no usable connection string, so it takes the same path and
+            # the refusal is worded as the deployment fault it is.
+            #
+            # This refuses `dev` too, deliberately and per R22.12:
+            # `check_budget` reads the store before it looks at the role, so an
+            # unreadable ledger stops the operator as well. That is the point —
+            # the one person who most needs to notice an outage is the one who
+            # can fix it — but it does mean a misconfigured `[spend]` block
+            # locks *everyone* out until secrets are corrected. Fixed by
+            # editing secrets, not by signing in.
+            store = MissingLedger()
+            cap = 0.0
+    # Buffered: without it every paid client's guard is its own round trip and
+    # every recorded cost is another — five or so per chat turn, and one per
+    # *window* on a document scan, which measured at roughly 550 connections
+    # for a 2 MB upload. A free-tier pooler refuses long before that, and
+    # because the ledger fails closed (R22.12) that refusal takes the whole app
+    # down rather than merely slowing it. `main` flushes it in a `finally`.
+    #
+    # Reused across runs rather than rebuilt, which is the correction to a real
+    # defect: `BufferedLedger` keeps the amount from a flush that failed so the
+    # next one can retry it, and a fresh buffer each run threw that away before
+    # the retry could ever happen. The object's own test proved the retention
+    # while the wiring defeated it. `rebind` opens the new run by forgetting
+    # what was *read* — R22.11 makes the store the authority and another
+    # container may have moved the number — while keeping what is still owed.
+    ledger = st.session_state.get(SPEND_BUFFER_KEY)
+    if isinstance(ledger, BufferedLedger):
+        ledger.rebind(store)
+    else:
+        ledger = BufferedLedger(store)
+        st.session_state[SPEND_BUFFER_KEY] = ledger
+    return Budget(ledger=ledger, cap=cap, estimate=estimate)
+
+
+def render_over_budget(decision) -> None:
+    """R22.13: told no, told which no, and told whose problem it is.
+
+    The two refusals are not interchangeable. "You have spent your budget" is
+    about the user and is final; "the ledger is unreachable" is a deployment
+    fault the user can neither cause nor fix, and telling them they overspent
+    would send them to argue with the wrong person about a number that is not
+    theirs.
+    """
+    if getattr(decision, "reason", None) == "unpriced":
+        st.error(
+            "⚠️ This app cannot read the price of the model it would use, so "
+            "it is refusing to spend on something it cannot cost. **This is "
+            "temporary and is not a limit you have reached** — try again in a "
+            "few minutes."
+        )
+        return
+    if getattr(decision, "reason", None) == "ledger_unavailable":
+        st.error(
+            "⚠️ This app cannot reach the ledger it records spending in, so it "
+            "is refusing to spend anything. **This is a deployment fault, not "
+            "a problem with your account** — nothing you have done has used up "
+            "a budget. Please tell the operator."
+        )
+        return
+    if getattr(decision, "reason", None) in {"unauthorized", "unarmed"}:
+        # Neither is a budget the user has exhausted. "Unauthorized" means no
+        # role at all, and "unarmed" means a paid client was built with no
+        # budget named — a wiring fault. Telling either of them they have
+        # reached their spend limit is, in `CapDecision`'s own words, a lie
+        # about a budget they do not have (R22.13).
+        st.error(
+            "⚠️ This app is refusing to spend on this request because it is "
+            "not correctly configured to account for it. **This is not a "
+            "limit you have reached** — nothing you have done has used up a "
+            "budget. Please tell the operator."
+        )
+        return
+    st.error(
+        "⚠️ You have reached the spend limit for this account, so no further "
+        "interview turns can be taken. Your transcript above is unaffected. "
+        "Ask the operator if you need more."
+    )
+
+
+def role_table():
+    """The operator's allowlist: authorized email -> role name (R21.7).
+
+    Read from Streamlit secrets, which is where a Cloud deployment sets it and
+    where a local `.streamlit/secrets.toml` sets it too. Absence is not an
+    error here — it is a refusal, decided by `authorize` rather than by this
+    reader, so that "no table" and "table that authorizes nobody" take exactly
+    the same path (R21.10).
+    """
+    try:
+        return st.secrets[ROLE_TABLE_KEY]
+    except Exception:
+        return None
+
+
+def user_claim(user, name):
+    """One claim off `st.user`, whichever access shape it presents."""
+    try:
+        if hasattr(user, "get"):
+            return user.get(name)
+        return getattr(user, name, None)
+    except Exception:
+        return None
+
+
+def signed_in(user):
+    """Whether Streamlit has an authenticated session for this browser (R21.2).
+
+    Separate from *authorized* on purpose, and the gate needs both: a visitor
+    who is not signed in must be sent to `st.login()`, while one who is signed
+    in but refused must not be — `st.login()` redirects unconditionally, so
+    sending an already-authenticated user there loops forever instead of
+    showing a message.
+
+    This deliberately does **not** re-check the ID token's `exp` claim, and an
+    earlier version's doing so was a category error worth recording. An ID
+    token is not a session: it is a one-time signed assertion that the person
+    proved their identity at `iat`, and `exp` bounds how long a relying party
+    should accept it *as proof of a fresh login*. The standard flow — which
+    Streamlit already implements — verifies it once at the OAuth callback and
+    then mints its own session, `_streamlit_user`, a signed cookie with
+    `Max-Age` of 30 days. `st.user` reads that cookie once at session start, so
+    `exp` is frozen at login and never refreshes. Re-checking it every run
+    therefore converted Google's ~1-hour token lifetime into a hard 1-hour cap
+    that dropped a candidate's transcript, documents and evaluations mid-
+    interview, which no service behaves like.
+
+    What that check was reaching for is revocation, and `role_table()` already
+    provides it, immediately and better: the allowlist is re-read from secrets
+    on *every* run (R21.7, R20.9), so removing an address locks that person out
+    on their next message regardless of any cookie. Accepted trade-off: a
+    stolen browser session authenticates for up to 30 days without touching
+    Google. Bounding that needs an absolute session age from `iat`, a
+    deliberate policy rather than a side effect of a token lifetime, and is
+    deferred (R21.20).
+    """
+    return bool(getattr(user, "is_logged_in", False))
+
+
+def current_identity():
+    """The identity port's adapter (R21.15) — one seam, now a real one.
+
+    Reads the authenticated session rather than an environment variable. The
+    port's shape is unchanged, which is the whole point of having had one:
+    everything downstream still asks a pure function a question.
+
+    Deliberately *not* consulted: the query string and `session_state`. R20.8
+    still holds — anything the browser can influence is not an identity, and
+    that is more true now that the answer decides who spends the operator's
+    money.
+    """
+    user = getattr(st, "user", None)
+    if not signed_in(user):
+        return ANONYMOUS
+    # `email_verified` is required, not decorative (R21.3). Without it the
+    # allowlist checks an address the signer never confirmed, and on any IdP
+    # that lets a user self-assert one at registration a stranger can be
+    # issued a validly signed token *as* an allowlisted person. Normalising the
+    # provider's spelling of the claim is this adapter's job; `authorize`
+    # demands the decided boolean and will not guess.
+    return authorize(
+        user_claim(user, "email"),
+        table=role_table(),
+        email_verified=user_claim(user, "email_verified") is True,
+    )
+
+
+def sign_in() -> None:
+    """Start the OIDC flow. Only ever from a click — never from a script run."""
+    try:
+        st.login()
+    except Exception as exc:
+        # A missing `[auth]` block or an absent Authlib is a deployment fault,
+        # not a user error, and saying so beats an unexplained traceback.
+        st.session_state["sign_in_error"] = str(exc)
+
+
+def render_sign_in() -> None:
+    """The whole app, for a visitor who has not signed in (R21.2).
+
+    `st.login()` is behind a button, and must stay there. Calling it in the
+    script body — as the first version did — redirects on every anonymous run,
+    which breaks three things at once:
+
+    * **Sign-out cannot work.** `st.logout()` enqueues a redirect to
+      `/auth/logout`, the same run then falls through to here and enqueues a
+      second redirect to `/auth/login`, and the browser applies the last one.
+      The provider still holds its own session, so the person is signed
+      straight back in. The Sign-out button that R21.21 exists for was
+      unusable, on this page and on the not-authorized page both.
+    * **The copy below is never read**, because the page navigates away before
+      it paints.
+    * **Cancelling at the provider loops.** The bounce back to `/` immediately
+      redirects to the provider again, with no state in which to stop.
+
+    Streamlit's own documented pattern puts `st.login()` behind a widget for
+    exactly this reason. Found by the WP2 code-review, not by the tests: the
+    sign-out test stubs `st.logout` with a no-op, so the follow-on rerun never
+    reached this function.
+    """
+    st.title("Interview Prep")
+    st.write(
+        "This app runs mock job interviews. Sign in to continue — access is "
+        "limited to accounts the operator has authorized."
+    )
+    st.button("Sign in with Google", type="primary", on_click=sign_in)
+    error = st.session_state.get("sign_in_error")
+    if error:
+        st.error(
+            "Sign-in is not configured on this deployment, so it cannot be "
+            f"used yet. ({error})"
+        )
+
+
+def render_not_authorized(identity) -> None:
+    """R21.13: refused, told why, told which account, offered a way out.
+
+    Two refusals with different causes and different fixers, so they get
+    different words. "Not on the allowlist" is for the operator to fix in
+    secrets. "Provider did not assert verification" cannot be fixed there at
+    all — the allowlist is working correctly and the provider is the problem —
+    and the first version of this page sent the operator to edit `[roles]`
+    anyway, where nothing they did would help.
+    """
+    st.title("Not authorized")
+    if getattr(identity, "refusal", None) == "unverified":
+        st.write(
+            "You are signed in, but the identity provider did not confirm that "
+            "this address is verified, so it cannot be matched against the "
+            "authorized list. **This is a deployment setting, not a problem "
+            "with your account** — adding the address to the list will not "
+            "change it."
+        )
+        st.caption(
+            "This app requires the `email_verified` claim, because an "
+            "unverified address proves nothing about who owns it. Google "
+            "provides it; some providers (Microsoft Entra ID among them) do "
+            "not send it at all."
+        )
+    else:
+        st.write(
+            "You are signed in, but this account is not on the authorized list "
+            "for this app. If you believe it should be, ask the operator to add "
+            "the address below."
+        )
+    st.code(identity.email or "(no email address on this account)")
+    st.write("Signed in with the wrong account? Sign out and try another.")
+    st.button("Sign out", on_click=st.logout)
+
+
+def in_script_thread(callback):
+    """Let a callback touch Streamlit from a worker thread.
+
+    ``create_agent`` runs its model and tool nodes on a ThreadPoolExecutor, and
+    Streamlit's script context is thread-local: an ``st.*`` call from one of
+    those threads raises ``NoSessionContext``. Observed live — every GitHub
+    tool call came back to the model as "failed after 3 attempts", and the
+    status line never moved, because painting the progress slot was what threw.
+
+    Progress no longer needs this: tools emit it through
+    ``runtime.stream_writer`` and it is rendered from the stream, on this
+    thread. Warnings and document registrations still do, because the policy
+    middleware raises them from inside ``wrap_tool_call`` — on the worker
+    thread. Routing those through the stream too would remove the last of this,
+    and is the obvious next simplification.
+    """
+    ctx = get_script_run_ctx()
+
+    def wrapper(*args, **kwargs):
+        add_script_run_ctx(threading.current_thread(), ctx)
+        return callback(*args, **kwargs)
+
+    return wrapper
+
+
 def record_warning(name, kind, reason=""):
     """Record a warning in both places: the permanent Warnings-tab log, and a
     one-shot flash shown in the chat window on the next run.
@@ -101,7 +478,7 @@ def record_warning(name, kind, reason=""):
     st.session_state["flash_warnings"].append(warning_message(entry))
 
 
-def sync_documents(api_key, container) -> DocumentIndex:
+def sync_documents(api_key, container, identity, budget) -> DocumentIndex:
     """Render the document widgets into ``container`` and sync the vector index.
 
     Handles the three session-level document events: an embedding-model switch
@@ -132,14 +509,52 @@ def sync_documents(api_key, container) -> DocumentIndex:
 
     docs = st.session_state["ingested_docs"]
     embedding_model = st.session_state["embedding_model"]
-    index = st.session_state.get("doc_index")
+    previous = st.session_state.get("doc_index")
+    index = previous
     if index is None or index.embedding_model != embedding_model:
-        index = DocumentIndex(api_key=api_key, embedding_model=embedding_model)
-        if docs:
-            with st.spinner("Re-embedding documents with the new model…"):
-                for doc in docs:
-                    index.add_document(doc)
-        st.session_state["doc_index"] = index
+        index = DocumentIndex(
+            api_key=api_key,
+            embedding_model=embedding_model,
+            identity=identity,
+            budget=budget,
+        )
+        try:
+            if docs:
+                with st.spinner("Re-embedding documents with the new model…"):
+                    for doc in docs:
+                        index.add_document(doc)
+        except OverBudget as exc:
+            # The one `add_document` call that was not wrapped. Switching the
+            # model re-embeds the whole corpus (R15.5) and the cap can be
+            # reached partway through, which leaves an index holding some
+            # documents and not others — retrieval over that is quietly worse
+            # rather than broken, which is the expensive kind of wrong. So the
+            # switch is abandoned rather than half-applied: the selector goes
+            # back to the model whose index is still intact, and the user is
+            # told why the model they picked did not take.
+            # Its own warning kind: the "budget" wording is written for a
+            # file ("… was not added. You can upload it again"), and telling
+            # someone who switched a dropdown to re-upload something they never
+            # uploaded is a message about a different event.
+            record_warning(embedding_model, "budget model switch", str(exc))
+            if previous is not None:
+                st.session_state["embedding_model"] = previous.embedding_model
+                index = previous
+            else:
+                # No intact index to fall back to (nothing was embedded before
+                # this switch). Keep the partial one rather than dropping the
+                # documents entirely; the warning is what tells the user the
+                # corpus is incomplete.
+                st.session_state["doc_index"] = index
+        else:
+            st.session_state["doc_index"] = index
+    # Handed *this* turn's budget, every run. The index lives in session state
+    # and is rebuilt only when the embedding model changes, so the `Budget` it
+    # was constructed with carries the estimate of the turn it was born in —
+    # and from turn two onward the cap would be checked against a figure for a
+    # prompt the user has already sent (R22.6). Invisible when wrong: no error,
+    # no warning, just a check asking about the wrong turn.
+    index.budget = budget
 
     new_files = [
         f
@@ -162,9 +577,25 @@ def sync_documents(api_key, container) -> DocumentIndex:
         if guard is None:
             # Documents get the mid-size scan model — off the latency-critical
             # path, and reliable at much bigger windows than the chat-turn nano.
-            guard = JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL)
-        with st.spinner(f"Scanning {file.name}…"):
-            verdict = guard.check_document(text)
+            guard = JailbreakGuard(
+                api_key=api_key,
+                model=GUARDRAIL_DOC_MODEL,
+                identity=identity,
+                budget=budget,
+            )
+        try:
+            with st.spinner(f"Scanning {file.name}…"):
+                verdict = guard.check_document(text)
+        except OverBudget as exc:
+            # Scanning and indexing both spend, so a refusal here is ordinary
+            # rather than exceptional — the cap can be reached mid-session, and
+            # a pricing outage refuses a scan outright (R22.7). The file is
+            # un-remembered so that retrying after a top-up, or after the
+            # catalog comes back, actually re-processes it instead of silently
+            # skipping a file the user believes was accepted.
+            st.session_state["ingested_file_ids"].discard(file.file_id)
+            record_warning(file.name, "budget", str(exc))
+            continue
         if not should_ingest(verdict):
             if not verdict.allowed:
                 record_warning(file.name, "flagged", verdict.reason)
@@ -174,8 +605,13 @@ def sync_documents(api_key, container) -> DocumentIndex:
         doc = IngestedDocument(
             name=file.name, doc_type=infer_doc_type(file.name), text=text
         )
-        with st.spinner(f"Indexing {file.name}…"):
-            index.add_document(doc)
+        try:
+            with st.spinner(f"Indexing {file.name}…"):
+                index.add_document(doc)
+        except OverBudget as exc:
+            st.session_state["ingested_file_ids"].discard(file.file_id)
+            record_warning(file.name, "budget", str(exc))
+            continue
         # Re-uploading a file with the same name replaces the earlier version
         # (add_document already replaced its chunks) — worth a warning, since
         # the user may not have intended to lose the previous one.
@@ -191,7 +627,7 @@ def sync_documents(api_key, container) -> DocumentIndex:
     return index
 
 
-def sync_knowledgebase(api_key):
+def sync_knowledgebase(api_key, identity, budget):
     """Open the persistent knowledge base and reconcile it with the seeds.
 
     The content sync runs once per session; the embedding-coverage sync also
@@ -208,12 +644,31 @@ def sync_knowledgebase(api_key):
         return None
     try:
         if kb is None:
-            kb = KnowledgeBase(db_path=KNOWLEDGEBASE_DB_PATH, api_key=api_key)
+            kb = KnowledgeBase(
+                db_path=KNOWLEDGEBASE_DB_PATH,
+                api_key=api_key,
+                identity=identity,
+                budget=budget,
+            )
+        # Stored before the sync, not after. `KnowledgeBase.__init__` opens a
+        # SQLite connection, and the `OverBudget` path below is deliberately
+        # un-latched — so dropping the object on a refusal meant every
+        # subsequent rerun built another one and leaked another connection.
+        st.session_state["knowledgebase"] = kb
         if st.session_state.get("kb_synced_model") != model:
             with st.spinner("Syncing the knowledge base…"):
                 kb.sync(KNOWLEDGEBASE_DIR, model)
             st.session_state["kb_synced_model"] = model
-        st.session_state["knowledgebase"] = kb
+        # Same reason as the document index: opened once per session, so the
+        # current turn's budget has to be handed to it on every run.
+        kb.budget = budget
+    except OverBudget as exc:
+        # Not latched, unlike every other failure here. `kb_failed` disables
+        # the knowledge base for the rest of the session and is only cleared by
+        # an embedding-model switch, which is right for a broken database and
+        # wrong for a refusal that a top-up — or the next turn — undoes.
+        record_warning("", "knowledgebase", str(exc))
+        return None
     except Exception as exc:
         st.session_state["kb_failed"] = model
         record_warning("", "knowledgebase", str(exc))
@@ -221,10 +676,28 @@ def sync_knowledgebase(api_key):
     return kb
 
 
-def main() -> None:
+def _run() -> None:
+    # Authentication and authorization first, before a key is even read
+    # (R21.2, R21.11). Every turn spends the operator's own credit, so an
+    # unauthorized visitor must not reach a model selector, an uploader, or a
+    # chat box — and `st.stop()` here means they reach none of them. The agent
+    # refuses independently (R21.12); this exists so the refusal is legible,
+    # not so it is enforced.
+    identity = current_identity()
+    if not signed_in(getattr(st, "user", None)):
+        render_sign_in()
+        st.stop()
+    if not identity.is_authorized:
+        # Signed in and refused — including a session with no email claim at
+        # all, which `render_not_authorized` says so. Deliberately not the
+        # sign-in page: that redirects, and redirecting an authenticated
+        # visitor loops forever.
+        render_not_authorized(identity)
+        st.stop()
+
     # Prefer a key from the environment/.env; otherwise let the user paste one
     # into the sidebar (kept in session only). Fail fast until we have a key.
-    env_key = load_api_key()
+    env_key = load_api_key() or secret_api_key()
     key_from_env = bool(env_key)
     api_key = env_key or render_api_key_input()
     if not api_key:
@@ -265,13 +738,47 @@ def main() -> None:
     if st.session_state["prompt_source_key"] not in source_keys:
         st.session_state["prompt_source_key"] = default_source(sources).key
 
-    # Four sidebar tabs: everything the interviewee touches lives in Interview;
-    # the accumulated per-answer evaluation cards in Evaluations; diagnostics
+    # Sidebar tabs: everything the interviewee touches lives in Interview; the
+    # accumulated per-answer evaluation cards in Evaluations; diagnostics
     # (context, spend, prompt config, retrieval debug) in Developer; the
     # accumulated document-rejection log in Warnings.
-    interview_tab, evaluations_tab, dev_tab, warnings_tab = st.sidebar.tabs(
-        ["Interview", "Evaluations", "Developer", "Warnings"]
-    )
+    #
+    # The last two are offered only to a role holding VIEW_DIAGNOSTICS (R20.10).
+    # Not rendering them is presentation, not protection, and no operation
+    # behind them is separately guarded today — none currently needs to be,
+    # since they only display state. The one with a real side effect is the
+    # embedding-model selector (switching it re-embeds every document, at
+    # cost), which is protected only by not being drawn; when a capability
+    # here needs a real guard it belongs in the operation, per R20.5. The
+    # warnings a user can act on still flash in the chat body either way
+    # (R20.6).
+    # Who you are, before what you can do — account chrome sits at the top of
+    # the sidebar, above the tabs, so it is the first thing visible and stays
+    # visible whichever tab is open. Not in the main window: that is the
+    # interview, and this would cost it vertical space permanently.
+    #
+    # One row, not three stacked elements. Stacked (caption, button, divider)
+    # it pushed the tabs far enough down that the sidebar needed scrolling
+    # before showing anything the person came for — chrome earning more space
+    # than the content. The divider is gone for the same reason: its margins
+    # cost more than the separation was worth.
+    #
+    # Sign-out belongs to being signed in, not to holding a permission
+    # (R21.21): every authorized identity gets it, dev and user alike. The
+    # address stays visible rather than hidden behind the button, because a
+    # sign-out control with no account name is a coin flip once more than one
+    # account is in play.
+    account, action = st.sidebar.columns([2, 1], vertical_alignment="center")
+    account.caption(f"{identity.email}")
+    action.button("Sign out", on_click=st.logout, use_container_width=True)
+
+    show_diagnostics = has(identity.role, Permission.VIEW_DIAGNOSTICS)
+    tab_labels = ["Interview", "Evaluations"]
+    if show_diagnostics:
+        tab_labels += ["Developer", "Warnings"]
+    sidebar_tabs = st.sidebar.tabs(tab_labels)
+    interview_tab, evaluations_tab = sidebar_tabs[0], sidebar_tabs[1]
+    dev_tab, warnings_tab = sidebar_tabs[2:4] if show_diagnostics else (None, None)
 
     model = st.session_state["openai_model"]
     # Reasoning effort is only meaningful for reasoning models, so the selector
@@ -308,6 +815,51 @@ def main() -> None:
         ),
     )
 
+    # The cap, read fresh from the store on every run (R22.11) — an in-process
+    # total would be a cache of a number another container may have moved.
+    # Decided against the *next-prompt estimate*, not against the total, so the
+    # turn that would cross the cap is the one refused (R22.6).
+    estimate = spend.next_estimate
+    if not pricing.is_known:
+        # The catalog is unreachable, so `turn_cost` priced every token at zero
+        # and `spend.next_estimate` is **0.0 rather than None** from turn two
+        # onward — which slipped past the `is None` test below and made
+        # `decide` compare a projected cost of nothing against any remaining
+        # budget. Every turn is then admitted, and the cap silently degrades to
+        # "refuse once already over", which is precisely what R22.6 forbids.
+        #
+        # R22.21 names the rule: an estimate that cannot be priced is
+        # *unmeasured*, not free, and falls to the flat floor. Set explicitly
+        # rather than left as None so the sidebar shows the figure the cap was
+        # actually decided against (R22.22).
+        estimate = UNMEASURED_TURN_USD
+    elif estimate is None:
+        # R10.6: nothing has been measured yet, which is true of the first turn
+        # of *every* session while the ledger's total is a lifetime one. Rather
+        # than fall back to the policy's flat floor, price what is actually
+        # known — the composed prompt and the history, at this model's rate —
+        # so the figure follows the configured model instead of a constant
+        # typed in beside it. Only when the rate is actually known: an
+        # unreachable catalog prices everything at zero, and a zero estimate
+        # would read as "this turn is free" rather than "we could not price
+        # it", which is what the policy's floor is for.
+        estimate = turn_cost(
+            pricing,
+            estimate_prompt_tokens(system_prompt, messages),
+            ASSUMED_REPLY_TOKENS,
+        )
+    # Show the figure the cap was decided against, not the one that was
+    # missing. R10.6 shows "N/A" before any completed exchange, which was
+    # honest while nothing depended on it — but the cap now refuses turns on
+    # the strength of the recomputed estimate above, and a user refused on a
+    # number the sidebar declines to show cannot check the arithmetic or
+    # understand why their next turn will not run (R22.22).
+    spend = replace(spend, next_estimate=estimate)
+    budget = current_budget(estimate)
+    decision = check_budget(
+        identity, ledger=budget.ledger, cap=budget.cap, estimate=budget.estimate
+    )
+
     # Interview tab, top → bottom: interviewer picker, effort selector just below
     # it, the context-window usage gauge, then the spend figures (no header — the
     # labels speak for themselves), then a slot the grounding warning fills once
@@ -319,13 +871,24 @@ def main() -> None:
             render_reasoning_selector(REASONING_EFFORTS)
             reasoning_effort = st.session_state["reasoning_effort"]
         render_context_bar(usage)
-        render_spend_metrics(spend)
+        render_spend_metrics(spend, decision)
         grounding_warning_slot = st.empty()
 
     # The uploader renders into the interview tab (below the above), then the
     # ingested panel renders right under it.
-    doc_index = sync_documents(api_key, interview_tab)
-    kb = sync_knowledgebase(api_key)
+    # Refused before anything paid is reachable, and before the uploader:
+    # ingesting a document scans and embeds it, which spends (R22.8 — the
+    # refusal is hard, not a quieter version of the app). The transcript is
+    # rendered first, because losing sight of the interview is not part of the
+    # penalty for running out of budget.
+    if not decision.allowed:
+        st.title("Interview preparation Chatbot")
+        render_history(messages)
+        render_over_budget(decision)
+        st.stop()
+
+    doc_index = sync_documents(api_key, interview_tab, identity, budget)
+    kb = sync_knowledgebase(api_key, identity, budget)
     if st.session_state["ingested_docs"] and not library.is_grounding_aware:
         grounding_warning_slot.warning(
             "⚠️ This prompt source is not grounding-aware — uploaded "
@@ -338,17 +901,18 @@ def main() -> None:
     with evaluations_tab:
         render_evaluations_tab(st.session_state["evaluation_cards"])
 
-    with dev_tab:
-        render_embedding_selector(EMBEDDING_MODELS)
-        render_sidebar(library, usage, spend)
-        render_retrieval_panel(
-            st.session_state["last_retrieval"], st.session_state["last_query"]
-        )
-        render_tool_calls_panel(st.session_state["last_tool_calls"])
-        render_knowledgebase_panel(kb)
+    if show_diagnostics:
+        with dev_tab:
+            render_embedding_selector(EMBEDDING_MODELS)
+            render_sidebar(library, usage, spend)
+            render_retrieval_panel(
+                st.session_state["last_retrieval"], st.session_state["last_query"]
+            )
+            render_tool_calls_panel(st.session_state["last_tool_calls"])
+            render_knowledgebase_panel(kb)
 
-    with warnings_tab:
-        render_warnings_log(st.session_state["warnings_log"])
+        with warnings_tab:
+            render_warnings_log(st.session_state["warnings_log"])
 
     st.title("Interview preparation Chatbot")
 
@@ -386,55 +950,51 @@ def main() -> None:
         # the {retrieved_context} slot. Only grounding-aware sources have the
         # slot; other sources get the system prompt untouched. Retrieval errors
         # degrade to an ungrounded turn rather than blocking the chat.
-        context_block = ""
-        if library.is_grounding_aware:
-            kb_ready = kb is not None and not kb.is_empty
-            if not doc_index.is_empty or kb_ready:
-                # On a follow-up, rewrite the message into a standalone query so
-                # vector search isn't handed an anaphoric fragment ("that role").
-                # The first turn has no referents to resolve — use it verbatim
-                # and skip the extra call. Condensing fails open to the prompt.
-                if messages:
-                    with st.spinner("Rephrasing your question for search…"):
-                        rewrite = QueryCondenser(api_key=api_key).condense(
-                            prompt, messages[-QUERY_REWRITE_HISTORY_TURNS:]
-                        )
-                    query = rewrite.query
-                    # Fail open, but tell the user we searched with the raw
-                    # message instead of a rewritten query.
-                    if rewrite.errored:
-                        record_warning("", "condense")
-                else:
-                    query = prompt
-                st.session_state["last_query"] = query
-                # Both retrievals fail open independently: answer with whatever
-                # context could be fetched, but say so.
-                retrieved = []
-                with st.spinner("Retrieving document excerpts…"):
-                    if not doc_index.is_empty:
-                        try:
-                            retrieved += doc_index.retrieve(query)
-                        except Exception as exc:
-                            record_warning("", "retrieval", str(exc))
-                    if kb_ready:
-                        try:
-                            retrieved += kb.retrieve(
-                                query, st.session_state["embedding_model"]
-                            )
-                        except Exception as exc:
-                            # Distinct kind: the "retrieval" copy talks about
-                            # uploaded documents, which may not even exist on
-                            # a KB-only grounded turn.
-                            record_warning("", "kb_retrieval", str(exc))
-                st.session_state["last_retrieval"] = retrieved
-                context_block = format_context_block(retrieved)
-            effective_prompt = fill_retrieved_context(system_prompt, context_block)
-        else:
-            effective_prompt = system_prompt
+        # Grounding policy — which query is searched, and what a failing source
+        # costs the turn — lives in `interview_prep.grounding` so it can be
+        # tested without a browser (tests/test_grounding.py). What stays here is
+        # presentation: the spinners, and writing the result to session state.
+        def condense_with_spinner(text, history):
+            with st.spinner("Rephrasing your question for search…"):
+                return QueryCondenser(
+                    api_key=api_key, identity=identity, budget=budget
+                ).condense(text, history)
 
-        guard = JailbreakGuard(api_key=api_key)
-        llm = InterviewLLM(
-            api_key=api_key, model=model, reasoning_effort=reasoning_effort
+        # A budget that ran out between the page's check and this call (a
+        # second tab, a second container) refuses here instead of degrading the
+        # turn to an ungrounded one — R22.8 makes the refusal hard, and a
+        # quietly worse answer is the downgrade it forbids.
+        try:
+            with st.spinner("Retrieving document excerpts…"):
+                grounded = ground_turn(
+                    prompt=prompt,
+                    history=messages,
+                    system_prompt=system_prompt,
+                    is_grounding_aware=library.is_grounding_aware,
+                    doc_index=doc_index,
+                    kb=kb,
+                    embedding_model=st.session_state["embedding_model"],
+                    condense=condense_with_spinner,
+                    warn=record_warning,
+                )
+        except OverBudget as exc:
+            render_over_budget(exc.decision)
+            st.stop()
+        effective_prompt = grounded.effective_prompt
+        # A `None` query means nothing was searched, so the Developer tab keeps
+        # showing the last real retrieval rather than being blanked by a turn
+        # that never looked anything up.
+        if grounded.query is not None:
+            st.session_state["last_query"] = grounded.query
+            st.session_state["last_retrieval"] = grounded.retrieved
+
+        guard = JailbreakGuard(api_key=api_key, identity=identity, budget=budget)
+        llm = InterviewAgent(
+            api_key=api_key,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            identity=identity,
+            budget=budget,
         )
         pending = messages + [{"role": "user", "content": prompt}]
         reply_parts = []
@@ -447,13 +1007,15 @@ def main() -> None:
             # Tools are offered only to grounding-aware sources: the research
             # tool indexes its raw excerpts for retrieval, which presumes the
             # RAG pipeline the source opted into.
-            toolbox = None
+            tools, policy, mcp_names = (), None, set()
             if library.is_grounding_aware:
 
                 def show_progress(message):
                     # A research hop streams no tokens for many seconds; keep
                     # the slot alive with a status line appended to whatever
-                    # has already streamed.
+                    # has already streamed. Called from the stream loop below,
+                    # on this thread — tools emit progress through
+                    # runtime.stream_writer rather than touching Streamlit.
                     streamed = "".join(reply_parts)
                     slot.markdown(f"{streamed}\n\n*{message}*" if streamed else f"*{message}*")
 
@@ -465,7 +1027,7 @@ def main() -> None:
                     docs[:] = [d for d in docs if d.name != doc.name]
                     docs.append(doc)
 
-                # GitHub portfolio tools (MCP) ride in the same toolbox. The
+                # GitHub portfolio tools (MCP) join the same tool list. The
                 # tools/list discovery round-trip runs once per session; its
                 # converted schemas are cached in session state. A discovery
                 # failure warns and caches an empty list, so the session
@@ -486,24 +1048,50 @@ def main() -> None:
                     if cached_specs:
                         github_mcp = GitHubMCP(pat=pat, specs=cached_specs)
 
-                toolbox = ToolBox(
-                    researcher=WebResearcher(api_key=api_key),
-                    guard=JailbreakGuard(api_key=api_key, model=GUARDRAIL_DOC_MODEL),
+                policy = ContentPolicy(
+                    guard=JailbreakGuard(
+                        api_key=api_key,
+                        model=GUARDRAIL_DOC_MODEL,
+                        identity=identity,
+                        budget=budget,
+                    ),
                     index=doc_index,
-                    cache=st.session_state["web_research_cache"],
-                    on_warning=record_warning,
-                    on_progress=show_progress,
-                    on_document=register_document,
-                    mcp=github_mcp,
-                    seen_terms=st.session_state["github_seen_terms"],
-                    code_corpus=st.session_state["github_code_corpus"],
+                    # Raised from inside wrap_tool_call, i.e. off the script
+                    # thread — see in_script_thread.
+                    on_warning=in_script_thread(record_warning),
+                    on_document=in_script_thread(register_document),
                 )
+                tools = build_tools(
+                    researcher=WebResearcher(
+                        api_key=api_key, identity=identity, budget=budget
+                    ),
+                    cache=st.session_state["web_research_cache"],
+                    mcp=github_mcp,
+                )
+                mcp_names = github_mcp.tool_names if github_mcp else set()
+
+            # The model reasons before it speaks, so the first token can take
+            # many seconds; keep the slot alive until it lands (the first
+            # streamed token repaints it).
+            slot.markdown(
+                f"*Reasoning with {reasoning_effort} effort…*"
+                if reasoning_effort
+                else "*Waiting for the model's reply…*"
+            )
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 guard_future = pool.submit(guard.check, prompt)
                 try:
                     for token in llm.stream_reply(
-                        effective_prompt, pending, toolbox=toolbox
+                        effective_prompt,
+                        pending,
+                        tools=tools,
+                        policy=policy,
+                        mcp_names=mcp_names,
+                        seen_terms=st.session_state["github_seen_terms"],
+                        code_corpus=st.session_state["github_code_corpus"],
+                        on_warning=in_script_thread(record_warning),
+                        on_progress=show_progress if tools else None,
                     ):
                         reply_parts.append(token)
                         slot.markdown("".join(reply_parts))
@@ -517,6 +1105,20 @@ def main() -> None:
                         # Stream finished on its own — now wait for the verdict
                         # before committing anything.
                         verdict = guard_future.result()
+                except OverBudget as exc:
+                    # The cap caught up with the turn mid-flight: the page
+                    # checked before it started, and another tab or container
+                    # spent the rest in between (R22.7's one-turn window).
+                    slot.empty()
+                    stream_failed = True
+                    # A tool sub-completion may have billed before screening
+                    # tripped the cap. Its cost never reached graph state, so
+                    # `llm.extra_cost` reads zero below; carried on the
+                    # exception instead so the turn is not shown as free.
+                    st.session_state["total_cost"] += getattr(
+                        exc, "billed_extra", 0.0
+                    )
+                    render_over_budget(exc.decision)
                 except AuthenticationError:
                     slot.empty()
                     stream_failed = True
@@ -539,6 +1141,15 @@ def main() -> None:
                         "⚠️ The request to OpenRouter failed, so no reply was "
                         f"generated. Please try again. ({detail})"
                     )
+
+        # This turn's spend, whatever became of the turn (R22.4). Both
+        # `st.stop()`s below end the run before the accounting block further
+        # down, so anything recorded there is lost on exactly the two paths
+        # where spend has already happened and produced no output. The ledger
+        # is not at risk — every client records its own, the agent included,
+        # from a `finally` — but the sidebar figure is, and a blocked turn
+        # showing no cost is how a user concludes the guardrail is free.
+        st.session_state["total_cost"] += (llm.turn_cost_usd or 0.0) + llm.extra_cost
 
         if stream_failed:
             st.stop()
@@ -584,43 +1195,30 @@ def main() -> None:
         # A deep-dive is a multi-step tool workflow, and it degrades badly below
         # "high" effort — tell the user once, after a turn that actually used
         # the GitHub tools, so the advice arrives with the evidence for it.
-        if toolbox is not None and not st.session_state["github_hint_shown"]:
-            hint = github_effort_hint(toolbox.mcp_calls, reasoning_effort)
+        if tools and not st.session_state["github_hint_shown"]:
+            hint = github_effort_hint(llm.mcp_calls, reasoning_effort)
             if hint:
                 st.session_state["flash_notices"].append(hint)
                 st.session_state["github_hint_shown"] = True
-        if toolbox is not None and toolbox.citations:
-            st.session_state["web_sources"] = list(toolbox.citations)
+        if llm.citations:
+            st.session_state["web_sources"] = list(llm.citations)
         # Evaluation cards commit only on an allowed, completed turn — the
-        # toolbox accumulated them during the stream, but a turn the guardrail
-        # blocks persists nothing, cards included.
-        if toolbox is not None:
-            st.session_state["evaluation_cards"].extend(toolbox.evaluations)
-            if looks_like_feedback(assistant_reply) and not toolbox.evaluations:
+        # turn's graph state accumulated them during the stream, but a turn the
+        # guardrail blocks persists nothing, cards included.
+        if tools:
+            st.session_state["evaluation_cards"].extend(llm.evaluations)
+            if looks_like_feedback(assistant_reply) and not llm.evaluations:
                 # The reply reads like scored answer feedback, but no card was
                 # recorded — the model skipped the record_evaluation call. The
                 # user-facing text lives in ui.warning_message.
                 record_warning("", "evaluation")
-        cost = llm.last_cost
-        if cost is None:
-            pricing_now = get_model_pricing(model, api_key)
-            if llm.last_usage is not None:
-                cost = turn_cost(
-                    pricing_now,
-                    llm.last_usage.prompt_tokens or 0,
-                    llm.last_usage.completion_tokens or 0,
-                )
-            else:
-                cost = turn_cost(
-                    pricing_now,
-                    estimate_prompt_tokens(effective_prompt, pending),
-                    estimate_text_tokens(assistant_reply),
-                )
-        # Tool sub-completions (web research) bill separately from the main
-        # stream's usage chunks; the toolbox accumulated their reported cost.
-        if toolbox is not None:
-            cost += toolbox.extra_cost
-        st.session_state["total_cost"] += cost
+        # The whole R22.3 ladder — actual cost, else reported tokens, else
+        # estimated ones — lives in the agent now, because it is the only
+        # object on every exit path from a turn. The page's copy of it sat
+        # below the two `st.stop()`s above, so a blocked turn priced at rungs
+        # two or three recorded nothing at all (R22.18: what is left here is a
+        # display of this chat's contribution to a durable total, never the
+        # authority on it).
 
         # Record the reasoning tokens this turn spent so the next-prompt estimate
         # can account for them (they're billed as output but absent from content).
@@ -631,7 +1229,7 @@ def main() -> None:
             "role": "assistant",
             "content": assistant_reply,
             "reasoning_tokens": llm.last_reasoning_tokens or 0,
-            "context_tokens": estimate_text_tokens(context_block),
+            "context_tokens": estimate_text_tokens(grounded.context_block),
         }
         # The guardrail fails open on any classifier error; flag the turn so the
         # UI can note that this prompt went through unscreened.
@@ -642,6 +1240,29 @@ def main() -> None:
         # A single rerun refreshes the sidebar (context usage + spend) now that
         # the turn is complete — no mid-turn recompute needed.
         st.rerun()
+
+
+def main() -> None:
+    """Run one Streamlit script run, and always settle the spend it made.
+
+    The flush is in a `finally` because the ordinary ways this script ends are
+    exceptions: `st.stop()` on every refusal path and `st.rerun()` after a
+    completed turn both raise, and a plain call at the end of `_run` would be
+    reached by neither. Spend buffered during a run and never written is spend
+    the next turn is decided without — under-counting, the expensive direction.
+
+    A failed flush is not raised. By the time anything is pending the money is
+    already gone, and killing the run would cost the user their answer without
+    saving the operator a cent; `BufferedLedger` keeps the amount for the next
+    attempt, and the store is read again before the next turn is allowed, so an
+    outage still stops the spending within a turn (R22.12).
+    """
+    try:
+        _run()
+    finally:
+        buffered = st.session_state.get(SPEND_BUFFER_KEY)
+        if buffered is not None:
+            buffered.flush()
 
 
 if __name__ == "__main__":

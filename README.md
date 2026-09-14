@@ -20,8 +20,7 @@ The interviewer's behavior is defined entirely in the markdown prompt files unde
 - A file whose name ends with **`.ignore.md`** is hidden from the selector (used for non-persona prompts such as `guardrail.ignore.md`).
 - A prompt that contains the **`{retrieved_context}` placeholder** is *grounding-aware*: excerpts retrieved from the uploaded documents are injected there each turn. Prompts without it simply ignore uploaded documents (the sidebar says so).
 
-Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `knowledgebase`, `query_rewrite`, `tools`, `web_research`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
-Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `llm`, `pricing`, `guardrails`, `ingest`, `retrieval`, `tools`, `web_research`, `github_mcp`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together.
+Application code lives in the `interview_prep/` package (`config`, `prompts`, `context`, `agent`, `middleware`, `policy`, `pricing`, `guardrails`, `ingest`, `retrieval`, `knowledgebase`, `query_rewrite`, `tools`, `web_research`, `github_mcp`, `ui`); `chat_bot.py` is the thin Streamlit entry point that wires them together. See [`docs/diagrams/architecture.md`](docs/diagrams/architecture.md) for diagrams of how the pieces fit together — including the agent's graph.
 
 ## Documents (RAG)
 
@@ -77,6 +76,78 @@ uv sync
 The `.env` file is gitignored and loaded automatically at startup. Alternatively, export `OPENROUTER_API_KEY` in your shell. In production, use your host's secrets manager rather than a file.
 
 Optionally, set `GITHUB_PAT` in the same `.env` to enable the GitHub portfolio deep-dive: create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens) with read-only access to public repositories. Without it, the app runs normally minus that feature.
+
+### Sign-in and access
+
+**Signing in is required, and signing in is not enough.** Access needs a Google (or other OIDC provider) sign-in *and* an entry for that address in the operator's allowlist. Every turn spends the operator's own OpenRouter credit, so a successful login — which any Google account holder in the world can complete — is not grounds to be served.
+
+Both halves are configured in `.streamlit/secrets.toml`, and **until they are, the app serves nobody** — not even the operator. Copy the template and fill it in:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # then edit it
+```
+
+1. **Register an OIDC client with your provider.** For Google, that is a *Web application* OAuth 2.0 Client ID in the Google Cloud Console (APIs & Services → Credentials). Note its client ID and client secret, and list your redirect URI under *Authorized redirect URIs*.
+2. **Write `[auth]`** into `.streamlit/secrets.toml`: `redirect_uri`, `cookie_secret` (a long random string you generate), `client_id`, `client_secret`, and `server_metadata_url` (for Google, `https://accounts.google.com/.well-known/openid-configuration`). This is read by Streamlit's native OIDC support, not by this app's code — no credential is ever handled here. It needs the `Authlib` dependency, which `uv sync` installs.
+3. **`redirect_uri` differs per environment and must match the provider's registration exactly** — scheme, host, port and path. Locally it is `http://localhost:8501/oauth2callback`; deployed it is `https://<your-app-host>/oauth2callback`. Register both if you run both. A drifted value fails at the provider with an error the app cannot explain.
+4. **Write `[roles]`** — the allowlist, mapping each authorized email to a role:
+
+   ```toml
+   [roles]
+   "operator@example.com" = "dev"
+   "candidate@example.com" = "user"
+   ```
+
+   Presence in this table is authorization; **absence is refusal**. A `dev` role additionally sees the **Developer** and **Warnings** sidebar tabs; a `user` sees Interview and Evaluations. An unrecognized role name still keeps access and just loses the extra tabs — a typo in secrets should cost a sidebar tab, not lock someone out — but an **absent, unreadable, or non-mapping `[roles]` table authorizes nobody, including you.** That direction is deliberate: a deployment that serves no one is noticed and fixed in minutes, while one that quietly admits the world to a funded API key produces no error and a bill. List your own address too; you are not exempt.
+
+Warnings you can act on (a rejected upload, a retrieval fallback, an unverified reference) still appear in the chat itself for every role.
+
+> **Never commit `.streamlit/secrets.toml`** — it holds a live client secret and your cookie signing key. Only the `.example` template belongs in git. On Streamlit Community Cloud, paste the same contents into the app's *Secrets* settings instead of committing a file.
+
+The email address the app trusts is the **verified** email claim from the provider (`email_verified`), because OIDC proves an address only if the provider says it verified it; a session without one is treated as not signed in. Sessions are re-checked on every run and an expired token is logged out. See `docs/REQUIREMENTS.md` § 21 and [ADR-0200](docs/decisions/0200-authentication-is-oidc-plus-an-explicit-allowlist.md).
+
+### Spend cap
+
+**An invited user is not an unlimited one.** Every turn draws on the operator's OpenRouter credit, so each authorized address has a lifetime USD budget, counted in an external Postgres and checked before every turn. A `dev` is not capped. The earlier plan — make a `user` bring their own API key — is withdrawn: it defends the wallet by removing the reason to visit (`docs/REQUIREMENTS.md` § 22, [ADR-0210](docs/decisions/0210-hosted-postgres-ledger-for-the-spend-cap.md)).
+
+5. **Create the ledger table** in a hosted Postgres (Supabase's free tier is what this was built against):
+
+   ```sql
+   create table spend (
+     email      text primary key,
+     total_usd  numeric(18, 12) not null default 0,
+     updated_at timestamptz     not null default now()
+   );
+   ```
+
+6. **Write `[spend]`** into the same secrets file — the **transaction pooler** connection string (port 6543; the app disables prepared statements for it) and the cap:
+
+   ```toml
+   [spend]
+   connection_string = "postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres"
+   cap_usd = 5.00
+   ```
+
+   Percent-encode the password: Supabase generates passwords containing `@`, `:` and `/`, and a raw one splits the URI at the wrong place — which libpq reports as a host it cannot resolve, reading like a DNS fault rather than a quoting one.
+
+   **A missing or unreachable ledger refuses every turn**, for the same reason an unusable `[roles]` table authorizes nobody: the alternative silently uncaps every account at exactly the moment nobody is watching. The sidebar shows a capped user what is left; a user who runs out and a deployment whose database is down are told different things, because only one of them is about the user.
+
+Why a hosted database rather than the SQLite file the knowledge base uses: Streamlit Community Cloud recycles containers freely, so a local total silently resets to zero, and two containers may serve the same person at once. ADR-0210 also records, plainly, that OpenRouter's provisioned per-user keys would be the better mechanism, and why this one was chosen anyway.
+
+## Deploying
+
+`docs/DEPLOYMENT.md` covers deployment to Streamlit Community Cloud: the
+settings that cannot be changed after the first deploy, where the secrets go
+(and the TOML ordering that decides whether the API key is found at all), the
+`redirect_uri` chicken-and-egg with Google, the Supabase pooler and column
+precision the spend cap depends on, and what a container recycle does and does
+not reset.
+
+Two things there are worth knowing before you start: **the free Supabase tier
+pauses after 7 days idle**, and because the spend cap fails closed (R22.12) a
+paused database means the app serves nobody until it is woken. And the
+**spend ledger is the one thing that survives a recycle** — that is what WP4
+was for.
 
 ## Run
 

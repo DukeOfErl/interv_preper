@@ -151,6 +151,34 @@ def warning_message(entry) -> str:
         return f"**{entry['name']}** was rejected by the safety scan" + (
             f": {entry['reason']}" if entry["reason"] else "."
         )
+    if entry["kind"] == "budget model switch":
+        # Its own wording because the event is not a document. Switching the
+        # embedding model re-embeds the whole corpus (R15.5), and a refusal
+        # partway leaves an index holding some documents and not others — so
+        # the switch is abandoned and the previous model kept. The "budget"
+        # message below tells the user to upload the thing again, which for a
+        # dropdown is advice about something they never did.
+        return (
+            f"The embedding model could not be changed to **{entry['name']}**, "
+            "because the app is refusing to spend on re-embedding your "
+            "documents right now"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+            + " Your documents are unchanged and still searchable with the "
+            "previous model."
+        )
+    if entry["kind"] == "budget":
+        # Deliberately does NOT say "nothing was charged", which an earlier
+        # version did. Screening runs before the decision to index and costs
+        # money either way (R22.4), so a document refused at the indexing step
+        # has already moved the budget — and a user near their cap needs to
+        # know that an upload they could not complete still counts.
+        return (
+            f"**{entry['name']}** was not added, because the app is refusing "
+            "to spend on it right now"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+            + " Anything already spent screening it still counts towards your "
+            "budget. You can upload it again."
+        )
     if entry["kind"] == "overwrite":
         return (
             f"**{entry['name']}** replaced a previously ingested document "
@@ -176,6 +204,13 @@ def warning_message(entry) -> str:
             f"{entry['name']}` that does not match any file read from GitHub. "
             "It may be the interviewer's own illustration — but if it was "
             "presented as your code, treat it as invented."
+        )
+    if entry["kind"] == "github listing blocked":
+        return (
+            f"A repository listing for `{entry['name']}` was withheld by the "
+            "safety scan"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+            + " File and folder names are read by the interviewer too."
         )
     if entry["kind"] == "github file blocked":
         return (
@@ -373,14 +408,32 @@ def render_evaluations_tab(cards) -> None:
         st.divider()
 
 
-def render_spend_metrics(spend: ChatSpend) -> None:
-    """The two spend figures (total + next-prompt estimate); no pricing line."""
-    total_col, next_col = st.columns(2)
-    total_col.metric("Total this chat", format_spend(spend.total_cost))
-    next_col.metric(
+def render_spend_metrics(spend: ChatSpend, decision=None) -> None:
+    """The spend figures: this chat, the next prompt, and what is left (R22.17).
+
+    `decision` is the turn's `CapDecision`, or None where no cap is configured.
+    A role that is not capped has no budget to show, so the third column
+    appears only for a role that does — and when the ledger cannot be read, the
+    number is replaced by the reason rather than by a zero, which would read as
+    "you have spent it all" (R22.13).
+    """
+    budget_left = None
+    if decision is not None:
+        if decision.reason == "ledger_unavailable":
+            budget_left = "unknown"
+        elif decision.remaining is not None:
+            budget_left = format_spend(decision.remaining)
+
+    columns = st.columns(2 if budget_left is None else 3)
+    columns[0].metric("This chat", format_spend(spend.total_cost))
+    columns[1].metric(
         "Est. next prompt",
         "N/A" if spend.next_estimate is None else format_spend(spend.next_estimate),
     )
+    if budget_left is not None:
+        columns[2].metric("Budget left", budget_left)
+    if decision is not None and decision.reason == "ledger_unavailable":
+        st.caption("⚠️ The spend ledger is unreachable, so no turn can be taken.")
 
 
 def render_context_bar(usage: ContextUsage) -> None:

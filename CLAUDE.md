@@ -2,94 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## LLM Coding Guidelines (Karpathy-inspired)
-
-Behavioral guidelines to reduce common LLM coding mistakes.
-
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-### 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-### 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-### 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-### 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
-
-## Git project management
-
-**All work happens on a branch, scoped to an explicit work package.** A work package is a one- or two-sentence statement of the goal and what "done" looks like — small enough to live on a single branch and merge as a unit.
-
-- **Branch; don't work on `dev`/`main`.** Each work package gets a dedicated branch off `dev` (or off a daughter branch, for sub-work that builds on still-unmerged work). Integration happens only through the merge flow, which requires the user's explicit approval (a `git merge` / `gh pr merge` guardrail lives in the user's settings).
-- **No branch → stop and advise, don't start editing.** When changes are requested but nothing is open to hold them — the current branch is `dev`/`main`, or a branch whose work package doesn't cover the request — first help the user define a clear work package (goal + done-criteria) and open a dedicated branch for it (propose a name and scope). Begin the changes only once that branch exists.
-- **Drift → flag it, don't silently absorb it.** While a work package is in progress, watch for scope drift: an unrelated fix, a second feature creeping in, or growth well beyond the stated goal. When it happens, say so explicitly ("this is drifting from *&lt;work package&gt;*") and propose how to proceed — typically one of: (a) move the extra work to its own branch off `dev`, (b) consciously widen the current work package if the addition genuinely belongs to it, or (c) defer/stash the tangent. Let the user choose.
-- **Keep branches focused and short-lived** so they stay reviewable and merge cleanly.
-
-## Documentation upkeep
-
-When a change alters the architecture or user-visible functionality in a major way (new module, new pipeline, new UI capability, changed data flow), update **all four** docs in the same change — they serve different readers and go stale independently:
-
-- **`README.md`** — what the app does and how to use it (for users and new developers)
-- **`docs/diagrams/`** — the user/developer diagrams (currently `docs/diagrams/architecture.md`), updated **following the principles in `docs/diagrams/DIAGRAMS.md`** (one diagram per story, sequence diagrams for temporal flows, ~7±2 boxes each), together with the references to these diagrams from `README.md`
-- **`docs/REQUIREMENTS.md`** — the behavioral spec (what the app must do, kept implementation-agnostic)
-- **`CLAUDE.md`** — this file's Architecture section (how the code is organized, for coding agents)
-
-Small fixes and internal refactors that don't change behavior or structure don't need this.
-
-**Architecture Decision Records (`docs/decisions/`).** When a decision shapes the project in a way worth remembering — a non-obvious technical choice, an accepted trade-off, a convention, a reversal — record it as an ADR. Copy `docs/decisions/0000-decision-template.md` to `docs/decisions/NNNN-concise-kebab-name.md`, where `NNNN` is the highest existing id **plus 10** (the first real ADR is `0010-…`; `0000` is the reserved template). Gap numbering leaves room to slot a later decision between two existing ones. Fill in status, date, the pull request, and the context / decision / trade-off. Write the ADR as part of the same change that makes the decision — not retroactively.
-
-**Changelog (`CHANGELOG.md`).** Keep `CHANGELOG.md` (project root, Keep a Changelog format) current as work progresses: for any user-visible or otherwise notable change (new capability, changed behavior, removal, fix), add a bullet under `## [Unreleased]` in the appropriate Added / Changed / Removed / Fixed group. Move those bullets into a versioned section when a release is tagged.
-
 ## What this is
 
 A Streamlit chatbot that runs mock job interviews. It intakes a user's target role/resume, conducts a realistic interview one question at a time, and scores each answer. The interviewer's entire behavior lives in the markdown prompt files, not in Python — the Python is a thin Streamlit + LLM-streaming shell around a system prompt assembled from those files.
@@ -107,7 +19,13 @@ uv run pytest path/to/test.py::name  # run a single test
 
 `OPENROUTER_API_KEY` must be set before running — via a local `.env` file (see `.env.example`, loaded by `config.load_api_key()`) or the environment. The app talks to OpenRouter via the OpenAI SDK (`base_url="https://openrouter.ai/api/v1"`), not to OpenAI directly. If the key is missing, `chat_bot.py` shows an `st.error` and calls `st.stop()` (fail fast).
 
+`.streamlit/secrets.toml` must also exist before the app serves anyone — it holds the `[auth]` OIDC config, the `[roles]` allowlist and the `[spend]` ledger/cap (see `.streamlit/secrets.toml.example`); `Authlib>=1.3.2` and `psycopg[binary]` are required dependencies. **An absent or unreachable `[spend]` ledger refuses every turn** (R22.12), the same fail-closed direction an unusable `[roles]` table takes. The tests need neither: the identity port is injectable, so they pass an `Identity` directly and never perform a login (R21.16).
+
 **`chat_bot.py` is the entry point** — a thin Streamlit shell; the logic lives in the `interview_prep/` package.
+
+**Login is required, and login alone is not access.** Authentication is Streamlit's native OIDC (`st.login()` / `st.user` / `st.logout()`), configured through `[auth]` in `.streamlit/secrets.toml` (`redirect_uri` — which differs between local and deployed — `cookie_secret`, `client_id`, `client_secret`, `server_metadata_url`). Authorization is a **separate** `[roles]` table in the same file mapping authorized email → role (`dev` / `user`); an unusable table authorizes nobody, so the app serves no one until both blocks exist. `chat_bot.current_identity()` is the **identity port's adapter** (with `role_table`, `user_claim`, `signed_in`, `token_has_expired`): it reads `st.user` and `st.secrets`, never the query string or `session_state`, requires the verified email claim, and logs out an expired token. The gate at the top of `main()` renders `render_sign_in()` or `render_not_authorized()` and calls `st.stop()` — the legibility of the refusal, not its enforcement, which lives in `authorization.require_authorized` (ADR-0200, REQUIREMENTS § 21).
+
+**And access alone is not unlimited spend.** A third gate follows the first two: `chat_bot.current_budget()` reads `[spend]` and hands every paid client a `Budget`, `main()` refuses the turn before the uploader is even drawn, and each client checks the cap inside the operation that spends (ADR-0210, REQUIREMENTS § 22). The ledger is read **and written every turn** — `st.session_state["total_cost"]` is now a display of this chat's contribution to a durable per-identity total, never the authority (R22.18).
 
 ## Architecture
 
@@ -116,14 +34,22 @@ uv run pytest path/to/test.py::name  # run a single test
 - `config.py` — constants, paths (`PROMPTS_DIR`, `DEFAULT_PROMPT_SOURCE`, `IGNORE_TAG`, `DEFAULT_MODEL`), and `load_api_key()`
 - `prompts.py` — `PromptSource` / `PromptLibrary` / `PromptFile`: discover, load, and compose the markdown prompt
 - `context.py` — token estimation + `get_model_context_window()`; `compute_context_usage()` returns a `ContextUsage`
-- `llm.py` — `InterviewLLM`: OpenRouter client, `stream_reply()` yields tokens; with a `toolbox` it becomes the tool-calling loop (stream → run tools → stream again, capped by `MAX_TOOL_HOPS`, cost accumulated across hops)
-- `tools.py` — `ToolBox`: tool schemas + dispatcher (`run()` never raises — failures return error strings). Two local tools with opposite policies: `web_research(query, topic)` (consent-gated) and `record_evaluation(...)` (always-call after scoring — the structured-output channel behind the Evaluations tab, ADR-0120). Optionally also carries an MCP client (`mcp=`) whose discovered tools it merges and dispatches — a fetched repository file goes through the same fail-closed scan → index → bounded-excerpt route as web research's tier two (ADR-0130)
+- `agent.py` — `InterviewAgent`: the turn, as a LangChain `create_agent` graph. `stream_reply()` yields tokens; it asks the stream for `["messages", "custom", "values"]` at once, so the reply comes from the graph's **final state** (not reconstructed from chunks), progress arrives on the consuming thread, and spend accumulates across hops. The only loop (ADR-0170)
+- `middleware.py` — the harness: `InterviewState` (turn-scoped `files_read`, `citations`, `evaluations`, counters, `extra_cost`), `content_policy_middleware` (screens **every** tool result and records provenance only for what it admits), `announce_exhausted_tools`, `catch_typed_tool_call`, `final_hop_note`
+- `policy.py` — `ContentPolicy` / `ToolOutcome`: the fail-closed screen-and-index rules, deliberately importing no agent framework (ADR-0150)
+- `permissions.py` — `Role` / `Permission` / `has()` / `resolve_role()`: the role model as a pure function, importing neither Streamlit nor any agent framework, so the same check serves the page, the agent path and the tests. Grades what an **authorized** role may *do*; fail-closed to `Role.USER` on every input it cannot interpret. It no longer carries the identity port — `current_role()` and its env-var adapter are deleted (ADR-0190, REQUIREMENTS § 20)
+- `pricing.py` — model rates and the R22.3 cost ladder: `price_of()` tries the `/models` catalog and falls back to the per-model `/endpoints` route (the only one that publishes prices for `EMBEDDING_MODELS`), `call_cost()` prices one completion (reported cost → reported tokens → estimated tokens), `embedding_cost()` prices an embedding call, which can only ever be an estimate
+- `spend.py` — `CapDecision` / `decide()` / `check_budget()` / `require_within_budget()` / `Budget` / `UNCAPPED` / `InMemoryLedger`: the third question, after who they are and whether they may be here — **how much may they spend**. `decide()` is a pure function of role, spend, cap and the *next-prompt estimate*, so the turn that would cross the cap is the one refused (R22.6); `dev` is exempt from the cap but not from the ledger (R22.9). Refuses "at_cap" and "ledger_unavailable" separately, because they are facts about different parties (R22.13). `Budget` is what the six paid clients hold — a store, a ceiling, this turn's estimate — and `UNCAPPED` is the null object they get when nobody is counting. Imports no Streamlit and **no database driver**, asserted by a test (ADR-0210, REQUIREMENTS § 22)
+- `ledger_postgres.py` — `PostgresLedger`: the spend port's hosted adapter (`total` / `record`). One row per normalised email, incremented in the database rather than in this process (two containers may serve the same person at once); `prepare_threshold=None` because Supabase's transaction pooler cannot serve prepared statements; every driver failure becomes `LedgerUnavailable`, which the policy fails closed on
+- `authorization.py` — `Identity` / `ANONYMOUS` / `authorize()` / `require_authorized()` / `Unauthorized`: the prior question — whether there is a role at all. `authorize(email, table=…, email_verified=…)` decides an authenticated email against the operator's `[roles]` allowlist: presence is authorization, **absence is refusal**, and `email_verified` must be exactly `True` (defaults to `False`, so an unaware caller fails closed). `role is None` means refused and is deliberately not `Role.USER`. An unrecognized role name costs privilege but keeps access; an absent, unreadable or non-mapping table authorizes **nobody**, operator included. Never raises. `require_authorized(identity)` is the guard **inside** each of the six paid clients (`isinstance`, not truthiness), not just in the page. Imports neither Streamlit nor any agent framework (ADR-0200, REQUIREMENTS § 21)
+- `tools.py` — the tools themselves, as independent LangChain tools in a list: `web_research(query, topic)` (consent-gated), `record_evaluation(...)` (always-call after scoring — the structured-output channel behind the Evaluations tab, ADR-0120; returns a `Command` that writes state), plus one relaying tool per discovered MCP tool (ADR-0130). **Tools screen nothing** — they report what they got as a `ToolOutcome` on the artifact channel and the middleware decides what the model sees
 - `web_research.py` — `WebResearcher`: quarantined sub-completion over OpenRouter's `web` plugin; returns cited bullets + verbatim excerpts; citation links validated in code (ADR-0100)
 - `github_mcp.py` — `GitHubMCP`: MCP client of the official GitHub remote MCP server (streamable HTTP + `GITHUB_PAT`); discovers tools at runtime, forwards a read-only allowlist with a consent suffix, relays calls one `asyncio.run` connection at a time (forcing compact-output args), returns an `MCPResult` that splits a fetched file's body from the inline text; discovery cached per session, fails soft. Also the after-the-fact fabrication checks — `unverified_references()` (invented names) and `unquoted_code_blocks()` (code blocks matching no fetched file) (ADR-0130)
 - `ingest.py` — `parse_document()` (PDF/DOCX/TXT/MD → text), `infer_doc_type()`, `should_ingest()` (the fail-closed screening policy)
 - `retrieval.py` — `DocumentIndex` (LangChain `InMemoryVectorStore` + `OpenAIEmbeddings` via OpenRouter), `format_context_block()` / `fill_retrieved_context()` (the context-block contract)
 - `knowledgebase.py` — `KnowledgeBase`: persistent curated reference material. Seeds live in `knowledgebase/*.md` (YAML frontmatter: category/tags, versioned in git); the derived SQLite file `data/knowledgebase.db` (gitignored) caches chunks + per-model embeddings, reconciled at startup by per-file content hash; cosine retrieval returns `RetrievedChunk`s that merge into the same context block (ADR-0110)
 - `query_rewrite.py` — `QueryCondenser`: rewrites a follow-up message into a standalone retrieval query (fails open)
+- `grounding.py` — `ground_turn()` / `GroundedTurn`: the turn's grounding **policy** — condense (only on a follow-up), retrieve from documents and knowledge base **independently fail-open**, render the context block, fill the slot. Imports no Streamlit: the condenser and warning sink are injected, spinners stay with the caller. `query is None` means nothing was searched, which is how `chat_bot` avoids blanking the last-retrieval panel on an ungrounded turn
 - `ui.py` — `render_prompt_selector()` / `render_sidebar()` / `render_history()` / document uploader + panels
 
 **System prompt is composed from markdown files, and the user picks which set.** The sidebar has a **System prompt** selector; each option is a *prompt source* discovered automatically from `prompts/` (no hardcoded file lists). A source is either:
@@ -151,7 +77,7 @@ The default source, `prompts/multi-role interviewer/`, holds the staged prompts:
 
 - **`docs/REQUIREMENTS.md`** — the behavioral spec: document RAG, the guardrails, query condensation, cost/token accounting, reasoning effort, streaming.
 - **`docs/decisions/`** — the ADRs (0010–0090): *why* each of those was built the way it was (e.g. fail-closed windowed document guardrail vs. fail-open concurrent chat guardrail; condense queries + defer LangGraph; LangChain for retrieval, raw SDK for chat).
-- **`docs/diagrams/architecture.md`** — the chat-turn, tool-turn (web research / GitHub MCP), ingestion, and module-map diagrams.
+- **`docs/diagrams/architecture.md`** — the chat-turn, tool-turn (web research / GitHub MCP), **agent-graph**, ingestion, and module-map diagrams.
 
 Read the relevant doc when a task touches that subsystem; keep it and the code in sync per **Documentation upkeep** above.
 

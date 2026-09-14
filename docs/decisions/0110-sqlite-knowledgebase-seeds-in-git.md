@@ -31,6 +31,17 @@ already live in the repo makes the repo the only distribution channel.
    `chunks`, `embeddings` — and retrieval as brute-force cosine over the
    cached vectors in numpy. `interview_prep/knowledgebase.py` owns all of it.
 2. **Seeds in git, DB derived — primarily so no database ever needs hosting.**
+
+   > **Narrowed on this point by [ADR-0210](0210-hosted-postgres-ledger-for-the-spend-cap.md).**
+   > "No database ever needs hosting" held for as long as everything this app
+   > stored was derived from files in the repo. The per-identity spend cap
+   > needs a total that survives a container restart and is shared between
+   > concurrent containers, which no derived local file can provide, so it uses
+   > a hosted Postgres. The claim below is narrowed rather than withdrawn: it
+   > still describes the knowledge base, whose SQLite file remains derived,
+   > disposable and local. The ledger is the single exception, and ADR-0210
+   > records why it was accepted and what it costs.
+
    The source of truth is `knowledgebase/*.md` (YAML frontmatter: `category` +
    free-form `tags`); the DB is rebuilt locally from them, so cloning the repo
    is the *complete* setup — there is no hosted artifact to download, publish,

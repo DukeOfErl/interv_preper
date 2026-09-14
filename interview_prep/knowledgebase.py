@@ -33,13 +33,16 @@ import yaml
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from .authorization import require_authorized
 from .config import (
     CHUNK_OVERLAP_CHARS,
     CHUNK_SIZE_CHARS,
     KB_TOP_K,
     OPENROUTER_BASE_URL,
 )
+from .pricing import bill_embedding
 from .retrieval import RetrievedChunk
+from .spend import UNCAPPED, resolve_budget
 
 # Bumped when the table layout changes. The DB is a derived artifact — on a
 # version mismatch the tables are dropped and rebuilt from the seeds rather
@@ -148,8 +151,27 @@ def _tags_line(tags: dict) -> str:
 class KnowledgeBase:
     """SQLite-backed knowledge base with per-model cached embeddings."""
 
-    def __init__(self, db_path, api_key, embeddings_factory=None):
+    def __init__(
+        self,
+        db_path,
+        api_key,
+        embeddings_factory=None,
+        identity=None,
+        budget=None,
+    ):
+        # Spends the operator's credit (R21.10, ADR-0200). Guarded here rather
+        # than in the caller because `evals/`, `tests/` and any future script
+        # reach this constructor without passing through the page. Only when
+        # the *real* client is built: an injected fake spends nothing.
+        if embeddings_factory is None:
+            require_authorized(identity, "KnowledgeBase")
+            budget = resolve_budget(budget, "KnowledgeBase")
         self._api_key = api_key
+        self._identity = identity
+        # Opened once per session and kept in session state, so — like
+        # DocumentIndex — the cap is checked at each embedding call rather
+        # than at construction (R22.5).
+        self.budget = budget or UNCAPPED
         # Allow an injected factory (tests); otherwise embed via OpenRouter,
         # same client settings as DocumentIndex.
         self._embeddings_factory = embeddings_factory or self._openrouter_embeddings
@@ -211,6 +233,16 @@ class KnowledgeBase:
             base_url=OPENROUTER_BASE_URL,
             check_embedding_ctx_length=False,
         )
+
+    def _bill(self, texts, model) -> None:
+        """Record what was just embedded (R22.2). Never raises.
+
+        Both callers sit under fail-open handlers — `sync` under
+        `chat_bot.sync_knowledgebase`'s, `retrieve` under `ground_turn`'s — and
+        one of them latches the knowledge base off for the whole session. A
+        failed price lookup must not be able to do that.
+        """
+        bill_embedding(self.budget, self._identity, texts, model, self._api_key)
 
     def _embedder(self, model):
         if model not in self._embedders:
@@ -281,9 +313,10 @@ class KnowledgeBase:
                 (model,),
             ).fetchall()
             if missing:
-                vectors = self._embedder(model).embed_documents(
-                    [t for _, t in missing]
-                )
+                self.budget.require(self._identity)
+                texts = [t for _, t in missing]
+                vectors = self._embedder(model).embed_documents(texts)
+                self._bill(texts, model)
                 self._conn.executemany(
                     "INSERT INTO embeddings (chunk_id, model, vector) VALUES (?, ?, ?)",
                     [
@@ -342,9 +375,12 @@ class KnowledgeBase:
         rows, matrix = self._load(model)
         if not rows:
             return []
+        # Embedding the query spends, every turn a grounded source is used.
+        self.budget.require(self._identity)
         query_vec = np.asarray(
             self._embedder(model).embed_query(query), dtype=np.float32
         )
+        self._bill([query], model)
         query_vec /= np.linalg.norm(query_vec) or 1.0
         scores = matrix @ query_vec
         top = np.argsort(scores)[::-1][:k]

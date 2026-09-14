@@ -6,11 +6,13 @@ everything above them — allowlist filtering, schema conversion, result
 splitting, argument overrides, the fabrication check — is exercised for real.
 """
 
+import json
 from types import SimpleNamespace
 
 from interview_prep.github_mcp import (
     GITHUB_CONSENT_POLICY,
     GitHubMCP,
+    _drop_directory_sizes,
     unquoted_code_blocks,
     unverified_references,
 )
@@ -340,3 +342,28 @@ def test_spec_supplies_an_object_schema_when_the_tool_declares_none():
     client = make_client(tools=[tool])
     (spec,) = client.discover()
     assert spec["function"]["parameters"] == {"type": "object", "properties": {}}
+
+
+# --- a zero we supplied must not read as evidence ----------------------------
+
+
+def test_directory_entries_lose_their_meaningless_size():
+    """GitHub reports ``size: 0`` for every directory.
+
+    Observed live: a model read ``{"name":"test","size":0,"type":"dir"}`` and
+    reported the test directory as *empty* — a claim the listing never made,
+    resting on a field we asked for and GitHub cannot fill.
+    """
+    listing = (
+        '[{"name":".gitignore","path":".gitignore","size":3298,"type":"file"},'
+        '{"name":"test","path":"test","size":0,"type":"dir"}]'
+    )
+    cleaned = json.loads(_drop_directory_sizes(listing))
+    assert cleaned[0]["size"] == 3298, "a file's size helps the model choose"
+    assert "size" not in cleaned[1]
+    assert cleaned[1]["name"] == "test", "everything else survives"
+
+
+def test_anything_that_is_not_a_listing_is_left_alone():
+    for text in ("successfully downloaded text file (SHA: abc)", "", "not json {"):
+        assert _drop_directory_sizes(text) == text

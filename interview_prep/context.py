@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from urllib import error, request
+from http.client import HTTPException
+from urllib import request
 
 import streamlit as st
 
@@ -16,11 +17,38 @@ from .config import (
 )
 
 
-@st.cache_data(ttl=MODELS_CACHE_TTL_SECONDS)
+class _CatalogUnavailable(Exception):
+    """A catalog fetch that failed, raised so the failure is not cached.
+
+    `st.cache_data` stores return values and **not** exceptions, which is the
+    whole mechanism here. Returning `[]` from inside the cached function cached
+    the emptiness for the full hour TTL, and an empty catalog is not neutral
+    downstream: `price_of` reports the model unpriceable, and
+    `JailbreakGuard._scan_estimate` refuses every document scan outright
+    (R22.21) while a tool turn dies on the same refusal. One eight-second
+    network blip therefore hard-refused every upload for an hour.
+
+    Raising instead means the next call retries, so an outage lasts as long as
+    the outage.
+    """
+
+
 def fetch_openrouter_models(api_key):
-    """Fetch the OpenRouter model catalog (cached). Returns [] on any failure."""
+    """Fetch the OpenRouter model catalog (cached). Returns [] on any failure.
+
+    The success path is cached; the failure path is not — see
+    `_CatalogUnavailable`.
+    """
     if not api_key:
         return []
+    try:
+        return _fetch_openrouter_models_cached(api_key)
+    except _CatalogUnavailable:
+        return []
+
+
+@st.cache_data(ttl=MODELS_CACHE_TTL_SECONDS)
+def _fetch_openrouter_models_cached(api_key):
 
     req = request.Request(
         f"{OPENROUTER_BASE_URL}/models",
@@ -30,10 +58,71 @@ def fetch_openrouter_models(api_key):
     try:
         with request.urlopen(req, timeout=8) as api_result_handle:
             payload = json.loads(api_result_handle.read().decode("utf-8"))
-    except (error.URLError, error.HTTPError, TimeoutError, json.JSONDecodeError):
-        return []
+    except (OSError, HTTPException, ValueError):
+        # Caught by base class deliberately, not by enumeration. The three
+        # bases cover every way this call has been seen to fail: transport
+        # (URLError, HTTPError, TimeoutError, ConnectionResetError — all
+        # OSError), a truncated chunked response (IncompleteRead, an
+        # HTTPException and *not* an OSError), and an unreadable body
+        # (JSONDecodeError, UnicodeDecodeError — both ValueError). An earlier
+        # hand-listed tuple missed the last two families while the docstring
+        # already promised "any failure", so a flaky connection crashed the
+        # page instead of degrading it per R14.2.
+        raise _CatalogUnavailable("the model catalog could not be read")
 
     return payload.get("data", []) if isinstance(payload, dict) else []
+
+
+def fetch_model_endpoints(model_id, api_key):
+    """Fetch one model's provider endpoints. Returns [] on any failure.
+
+    Success cached, failure not — see `_CatalogUnavailable`.
+    """
+    if not api_key or not model_id:
+        return []
+    try:
+        return _fetch_model_endpoints_cached(model_id, api_key)
+    except _CatalogUnavailable:
+        return []
+
+
+@st.cache_data(ttl=MODELS_CACHE_TTL_SECONDS)
+def _fetch_model_endpoints_cached(model_id, api_key):
+    """Fetch one model's provider endpoints (cached). Returns [] on any failure.
+
+    A second route, because the catalog ``/models`` returns is the **chat**
+    catalog: none of ``config.EMBEDDING_MODELS`` appears in it, so a price
+    looked up there is not "unknown pricing" (R22.3's named hole) but a
+    published price this app was reading from the wrong place. ``/models/{id}/
+    endpoints`` carries it — verified against the live API for all three
+    configured embedding models.
+
+    Same fail-soft contract, and the same three exception bases, as
+    ``fetch_openrouter_models``: a pricing lookup must never take the page down.
+    """
+    if not api_key or not model_id:
+        return []
+
+    req = request.Request(
+        f"{OPENROUTER_BASE_URL}/models/{model_id}/endpoints",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with request.urlopen(req, timeout=8) as api_result_handle:
+            payload = json.loads(api_result_handle.read().decode("utf-8"))
+    except (OSError, HTTPException, ValueError):
+        raise _CatalogUnavailable("the model's endpoints could not be read")
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    return endpoints if isinstance(endpoints, list) else []
+
+
+# The cache lives on the inner functions now, but `.clear()` is part of this
+# module's surface — tests reset it between cases, and a caller should not have
+# to know which half of the pair holds the cache.
+fetch_openrouter_models.clear = _fetch_openrouter_models_cached.clear
+fetch_model_endpoints.clear = _fetch_model_endpoints_cached.clear
 
 
 def find_model(models, model_id):

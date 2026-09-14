@@ -1,52 +1,53 @@
-"""Tools the interviewer LLM can call, and the dispatcher that runs them.
+"""The tools the interviewer can call.
 
 A *tool* is two things kept deliberately separate:
 
   1. a **schema** the model sees (name, description, JSON-Schema parameters) —
      prompt text, and the only thing that makes the model decide to call it, so
      the description does the real work (including the consent policy);
-  2. a **local implementation** the model never sees, invoked by ``ToolBox.run``
-     with the arguments the model produced.
+  2. an implementation the model never sees.
 
-Two *local* tools, with opposite invocation policies (policy lives per-tool, in
+Two local tools, with opposite invocation policies (policy lives per-tool, in
 the description — never in the loop):
 
 * ``web_research(query, topic)`` — CONSENT-GATED: only on the user's explicit
-  request. Its ``run`` flow is the security-relevant part (see
-  ``web_research.py`` for the dual-LLM rationale): cache → sub-completion
-  research → FAIL-CLOSED guardrail scan of the bullets → index the raw
-  excerpts (their own fail-closed scan) → return the bullets.
+  request. See ``web_research.py`` for the dual-LLM rationale.
 * ``record_evaluation(...)`` — ALWAYS-CALL: after every scored answer. Not an
-  action but a structured-output channel: the card the model would otherwise
-  only state as prose is captured as data for the Evaluations tab. No consent,
-  no guardrail scan (the content is the model's own output, not external).
+  action but a structured-output channel (ADR-0120): the card the model would
+  otherwise only state as prose is captured as data for the Evaluations tab.
+  The one tool whose output is not external text, so the one that skips the
+  screen — and it says so, by returning a ``Command`` rather than an outcome.
 
-A ``ToolBox`` may additionally carry MCP tools (``github_mcp.GitHubMCP``):
-their schemas are discovered from the remote server rather than written here,
-and ``run`` relays their calls. A fetched repository file takes the same
-two-tier route as web research — screened fail-closed, indexed for retrieval,
-returned only as a bounded excerpt.
+MCP tools (``github_mcp.GitHubMCP``) join the same list; their schemas are
+discovered from the remote server rather than written here.
 
-``run`` never raises. A model inventing arguments, a failing search, or a
-flagged result all come back as error strings the model can read and recover
-from — an exception here would abort the user's whole turn.
+**Nothing here screens, indexes, or records provenance.** A tool reports what
+it got as a ``ToolOutcome`` on the artifact channel and puts a placeholder in
+the content the model would read; ``middleware.content_policy_middleware``
+decides what is admitted. That is what makes screening impossible to forget —
+it is no longer something a tool does.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import date
+
+from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import StructuredTool
+from langgraph.types import Command
 
 from .config import (
     EVALUATION_DIMENSIONS,
     EVALUATION_SCORE_MAX,
     EVALUATION_SCORE_MIN,
-    GITHUB_FILE_INLINE_CHARS,
     QUESTION_TYPES,
     WEB_TOPICS,
 )
-from .ingest import IngestedDocument, should_ingest
+from .ingest import IngestedDocument
+from .policy import ToolOutcome
+from .spend import OverBudget
 
 
 # One dimension actually being scored: the dimension name, then at most a
@@ -75,455 +76,402 @@ def looks_like_feedback(reply_text) -> bool:
     return scored >= 3
 
 
-class ToolBox:
-    """The tools available for one turn, bound to that turn's live state.
+# The one tool whose output is not external text: an evaluation card is the
+# model's own words coming back to it. Every other tool result is screened, so
+# adding a tool that reaches outside needs no thought — and adding one that
+# should skip the screen is a visible, reviewable claim made here.
+MODEL_AUTHORED_TOOLS = {"record_evaluation"}
 
-    The model supplies only what the schemas declare (the judgment calls:
-    what to search, why). Everything else the implementations need — the
-    researcher, the guardrail, the vector index, the session cache, the UI
-    hooks — is bound at construction by the caller.
 
-    ``extra_cost`` accumulates the USD cost of sub-completions run by tools
-    this turn, for the caller to add to the turn's spend (the main loop's
-    usage accounting never sees these calls).
+def web_research_spec():
+    """The ``web_research`` schema.
+
+    A function, not a constant: the description carries today's date, and a
+    module-level constant would freeze it at import time — which in a
+    long-running Streamlit process means telling the model the wrong day.
     """
-
-    def __init__(
-        self,
-        researcher,
-        guard,
-        index,
-        cache=None,
-        on_warning=None,
-        on_progress=None,
-        on_document=None,
-        mcp=None,
-        seen_terms=None,
-        code_corpus=None,
-    ):
-        # Optional MCP client (e.g. GitHubMCP): contributes its discovered
-        # ``specs`` and handles calls routed by ``tool_names`` membership.
-        self._mcp = mcp
-        # Session-scoped record of everything MCP tools actually returned
-        # (repo paths, identifiers from fetched files). The caller keeps it
-        # across turns and checks replies against it, so a fabricated file or
-        # function can be flagged instead of passing silently.
-        self._seen_terms = seen_terms if seen_terms is not None else set()
-        # Verbatim text of every file fetched this session, so code the reply
-        # quotes can be checked by substring match rather than judgment.
-        self._code_corpus = code_corpus if code_corpus is not None else []
-        # This turn's tool activity, for ``final_hop_note``.
-        self.tool_calls_made = 0
-        self.mcp_calls = 0
-        self.files_read = []
-        self._researcher = researcher
-        self._guard = guard
-        self._index = index
-        # Called with each successfully indexed IngestedDocument so the caller
-        # can register it in the session's document list — otherwise the doc
-        # is invisible to the Documents panel and lost when an embedding-model
-        # switch rebuilds the index from that list.
-        self._on_document = on_document or (lambda doc: None)
-        # Session-scoped cache: normalized query -> bullets already returned.
-        # A chatty model will otherwise re-search the same company mid-session.
-        self._cache = cache if cache is not None else {}
-        self._on_warning = on_warning or (lambda name, kind, reason="": None)
-        self._on_progress = on_progress or (lambda message: None)
-        self.extra_cost = 0.0
-        # Citations from every research call this turn, for the sources panel.
-        self.citations = []
-        # Evaluation cards recorded this turn, for the caller to commit once
-        # the turn is allowed. Keyed by question: a repeat call for the same
-        # question is a correction and replaces that card (observed live — a
-        # model occasionally re-records with revised scores on the next hop),
-        # while distinct questions append (a message can answer two questions).
-        self.evaluations = []
-
-    @property
-    def specs(self):
-        """The tool schemas, in the shape the chat-completions API expects."""
-        local = self._local_specs()
-        if self._mcp is None:
-            return local
-        local_names = {spec["function"]["name"] for spec in local}
-        # A remote tool shadowing a local name would make dispatch ambiguous;
-        # the local tool wins.
-        return local + [
-            spec
-            for spec in self._mcp.specs
-            if spec["function"]["name"] not in local_names
-        ]
-
-    def _local_specs(self):
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_research",
+    return {
+        "name": "web_research",
+        "description": (
+            "Search the web and return cited fact bullets. Use it "
+            "for current information you cannot know: the target "
+            "company, up-to-date technologies for the role, "
+            "salary data, recent news. CONSENT POLICY: call this "
+            "only when the candidate has explicitly asked for web "
+            "research, or has just said yes to your offer to "
+            "research something. If you believe a search would "
+            "help but the candidate has not asked, offer it and "
+            "wait for their answer — never search preemptively. "
+            "Fuller excerpts from earlier searches may already "
+            "appear in your retrieved context; prefer those over "
+            "repeating a search. Today's date is "
+            f"{date.today():%B %d, %Y} — your own knowledge ends "
+            "earlier than that, so never write past years into "
+            "the query from memory; ask for what is current or "
+            "recent instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
                     "description": (
-                        "Search the web and return cited fact bullets. Use it "
-                        "for current information you cannot know: the target "
-                        "company, up-to-date technologies for the role, "
-                        "salary data, recent news. CONSENT POLICY: call this "
-                        "only when the candidate has explicitly asked for web "
-                        "research, or has just said yes to your offer to "
-                        "research something. If you believe a search would "
-                        "help but the candidate has not asked, offer it and "
-                        "wait for their answer — never search preemptively. "
-                        "Fuller excerpts from earlier searches may already "
-                        "appear in your retrieved context; prefer those over "
-                        "repeating a search. Today's date is "
-                        f"{date.today():%B %d, %Y} — your own knowledge ends "
-                        "earlier than that, so never write past years into "
-                        "the query from memory; ask for what is current or "
-                        "recent instead."
+                        "A standalone web search query, e.g. "
+                        "'Acme Corp engineering culture and recent news'."
                     ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": (
-                                    "A standalone web search query, e.g. "
-                                    "'Acme Corp engineering culture and "
-                                    "recent news'."
-                                ),
-                            },
-                            "topic": {
-                                "type": "string",
-                                "enum": WEB_TOPICS,
-                                "description": (
-                                    "Why you are searching. Shown back to "
-                                    "you later as the label on retrieved "
-                                    "excerpts from this research."
-                                ),
-                            },
-                        },
-                        "required": ["query", "topic"],
-                        "additionalProperties": False,
-                    },
+                },
+                "topic": {
+                    "type": "string",
+                    "enum": WEB_TOPICS,
+                    "description": (
+                        "Why you are searching. Shown back to you later as "
+                        "the label on retrieved excerpts from this research."
+                    ),
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "record_evaluation",
+            "required": ["query", "topic"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def record_evaluation_spec():
+    """The ``record_evaluation`` schema (see ADR-0120)."""
+    return {
+        "name": "record_evaluation",
+        "description": (
+            "Record your evaluation of the interview answer you "
+            "just scored. Call this EVERY time you give feedback "
+            "on an answer, immediately after scoring it, with the "
+            "SAME scores and the same strengths-and-gaps feedback "
+            "you told the candidate — never different numbers. "
+            "Call it once per scored answer; calling again for "
+            "the same question replaces that card. Do not call "
+            "it outside answer feedback (not during intake, not "
+            "for small talk)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
                     "description": (
-                        "Record your evaluation of the interview answer you "
-                        "just scored. Call this EVERY time you give feedback "
-                        "on an answer, immediately after scoring it, with the "
-                        "SAME scores and the same strengths-and-gaps feedback "
-                        "you told the candidate — never different numbers. "
-                        "Call it once per scored answer; calling again for "
-                        "the same question replaces that card. Do not call "
-                        "it outside answer feedback (not during intake, not "
-                        "for small talk)."
+                        "The interview question that was answered, "
+                        "shortened to one line."
                     ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "question": {
-                                "type": "string",
-                                "description": (
-                                    "The interview question that was "
-                                    "answered, shortened to one line."
-                                ),
-                            },
-                            "question_type": {
-                                "type": "string",
-                                "enum": QUESTION_TYPES,
-                            },
-                            "scores": {
-                                "type": "object",
-                                "description": (
-                                    "Your 1-5 score per rubric dimension — "
-                                    "identical to the scores in your reply."
-                                ),
-                                "properties": {
-                                    dimension: {
-                                        "type": "integer",
-                                        "minimum": EVALUATION_SCORE_MIN,
-                                        "maximum": EVALUATION_SCORE_MAX,
-                                    }
-                                    for dimension in EVALUATION_DIMENSIONS
-                                },
-                                "required": list(EVALUATION_DIMENSIONS),
-                                "additionalProperties": False,
-                            },
-                            "verbal_feedback": {
-                                "type": "string",
-                                "description": (
-                                    "Your strengths-and-gaps feedback for "
-                                    "this answer, as markdown — the same "
-                                    "content as your chat reply."
-                                ),
-                            },
-                        },
-                        "required": [
-                            "question",
-                            "question_type",
-                            "scores",
-                            "verbal_feedback",
-                        ],
-                        "additionalProperties": False,
+                },
+                "question_type": {"type": "string", "enum": QUESTION_TYPES},
+                "scores": {
+                    "type": "object",
+                    "description": (
+                        "Your 1-5 score per rubric dimension — identical to "
+                        "the scores in your reply."
+                    ),
+                    "properties": {
+                        dimension: {
+                            "type": "integer",
+                            "minimum": EVALUATION_SCORE_MIN,
+                            "maximum": EVALUATION_SCORE_MAX,
+                        }
+                        for dimension in EVALUATION_DIMENSIONS
                     },
+                    "required": list(EVALUATION_DIMENSIONS),
+                    "additionalProperties": False,
+                },
+                "verbal_feedback": {
+                    "type": "string",
+                    "description": (
+                        "Your strengths-and-gaps feedback for this answer, "
+                        "as markdown — the same content as your chat reply."
+                    ),
                 },
             },
-        ]
+            "required": [
+                "question",
+                "question_type",
+                "scores",
+                "verbal_feedback",
+            ],
+            "additionalProperties": False,
+        },
+    }
 
-    def run(self, name, arguments):
-        """Execute tool ``name`` with the model's ``arguments`` (a JSON string).
 
-        Always returns a string — the tool message's content — including for
-        failures. Raising here would abort the turn; an error string lets the
-        model recover or tell the user.
-        """
-        try:
-            parsed = json.loads(arguments) if arguments.strip() else {}
-        except json.JSONDecodeError:
-            return "error: arguments were not valid JSON"
-        handlers = {
-            "web_research": self._web_research,
-            "record_evaluation": self._record_evaluation,
-        }
-        handler = handlers.get(name)
-        if handler is not None:
-            self.tool_calls_made += 1
-            try:
-                return handler(**parsed)
-            except TypeError as exc:
-                # Models do invent arguments a schema never declared; splatting
-                # them would raise out of the tool loop and kill the turn.
-                return f"error: {exc}"
-        if self._mcp is not None and name in self._mcp.tool_names:
-            # Counted only for names that exist: a hallucinated tool name must
-            # not make ``final_hop_note`` claim tools were used.
-            self.tool_calls_made += 1
-            self._on_progress(f"Checking GitHub: {name}…")
-            try:
-                return self._github(name, parsed)
-            except Exception as exc:
-                # Network/auth failures from the remote server must not
-                # escape the never-raise contract.
-                self._on_warning(name, "github tool", str(exc))
-                return f"error: the GitHub tool {name!r} failed: {exc}"
-        return f"error: no tool named {name!r}"
+PENDING_SCREEN = "(pending safety screen — the harness replaces this)"
 
-    def final_hop_note(self):
-        """A reminder to inject before the answer is forced, or ``""``.
 
-        The tool loop withholds tools on its last hop to force a text answer.
-        A model still mid-exploration is then cornered: it must say something,
-        cannot fetch more, and (observed twice in testing) either invents a
-        repository or writes out the tool calls it *would* have made along with
-        their imagined results. Naming the situation is what makes stopping
-        honestly an available move — the note therefore fires whenever any tool
-        ran this turn, not only when nothing was read.
-        """
-        if not self.tool_calls_made:
-            return ""
-        preamble = (
-            "SYSTEM NOTE: you have no tool calls left this turn. Whatever you "
-            "have already received is all you get. Do NOT write tool calls, "
-            "tool arguments, or tool results in your reply, and do not "
-            "describe what a further call would have returned — a model in "
-            "your position has been observed acting out the rest of its "
-            "exploration in prose, which is fabrication. "
+def validate_evaluation_card(question, question_type, scores, verbal_feedback):
+    """Return ``(card, None)`` or ``(None, error_message)``.
+
+    The schema already constrains all of this, but providers enforce JSON
+    Schema unevenly — re-validating means a malformed card comes back to the
+    model as an error it can correct, instead of poisoning the Evaluations tab.
+    """
+    if not isinstance(question, str) or not question.strip():
+        return None, "error: question must be a non-empty string"
+    question = question.strip()
+    if not isinstance(verbal_feedback, str):
+        return None, "error: verbal_feedback must be a string"
+    if question_type not in QUESTION_TYPES:
+        question_type = "other"
+    if not isinstance(scores, dict):
+        return None, "error: scores must be an object of dimension -> integer"
+    missing = [d for d in EVALUATION_DIMENSIONS if d not in scores]
+    if missing:
+        return None, f"error: scores is missing dimensions: {', '.join(missing)}"
+    clean_scores = {}
+    for dimension in EVALUATION_DIMENSIONS:
+        value = scores[dimension]
+        # Accept integral floats (4.0): JSON Schema's "integer" does, so
+        # rejecting them would fail a schema-conforming call — and models retry
+        # such rejections verbatim until the hops run out.
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not EVALUATION_SCORE_MIN <= value <= EVALUATION_SCORE_MAX
+        ):
+            return None, (
+                f"error: score for {dimension!r} must be an integer "
+                f"between {EVALUATION_SCORE_MIN} and {EVALUATION_SCORE_MAX}"
+            )
+        clean_scores[dimension] = value
+    return {
+        "question": question,
+        "question_type": question_type,
+        "scores": clean_scores,
+        "verbal_feedback": verbal_feedback.strip(),
+    }, None
+
+
+def _record_evaluation_tool():
+    """The evaluation-card tool: writes graph state, screens nothing.
+
+    The one tool whose output is not external text — an evaluation card is the
+    model's own words coming back — so it returns a ``Command`` that updates
+    state directly rather than an outcome for the policy to admit.
+    """
+    spec = record_evaluation_spec()
+
+    def call(question, question_type, scores, verbal_feedback, runtime: ToolRuntime):
+        card, error = validate_evaluation_card(
+            question, question_type, scores, verbal_feedback
         )
-        if self.mcp_calls and not self.files_read:
-            return preamble + (
-                "This turn obtained no file contents at all — only listings, "
-                "searches, or errors — so you have not read any of this "
-                "candidate's code. Say that plainly and ask which file to "
-                "look at, or ask them to describe it."
+        if error is not None:
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=error,
+                            tool_call_id=runtime.tool_call_id,
+                            status="error",
+                        )
+                    ]
+                }
             )
-        if self.mcp_calls:
-            return preamble + (
-                "You read: "
-                + ", ".join(self.files_read)
-                + ". Work only from those (and your retrieved context). If you "
-                "need a file you did not read, say so and ask the candidate "
-                "about it, or offer to read it next turn."
-            )
-        return preamble + (
-            "Answer from what the tools already returned; if it was not "
-            "enough, say so plainly."
+        # Only this call's card: replacing an earlier one for the same question
+        # is the reducer's job (``middleware.merge_cards``), because two cards
+        # can be recorded in one hop and only the reducer sees both.
+        existing = runtime.state.get("evaluations") or []
+        note = (
+            "evaluation recorded (replaced your previous card for this question)"
+            if any(c["question"] == card["question"] for c in existing)
+            else "evaluation recorded"
+        )
+        return Command(
+            update={
+                "evaluations": [card],
+                "messages": [
+                    ToolMessage(content=note, tool_call_id=runtime.tool_call_id)
+                ],
+            }
         )
 
-    def _github(self, name, arguments):
-        """Relay one MCP call, treating a fetched file like a document.
+    return StructuredTool(
+        name=spec["name"],
+        description=spec["description"],
+        args_schema=spec["parameters"],
+        func=call,
+    )
 
-        Listings and searches come back inline. A file body does not: it is
-        screened fail-closed (like uploads and web research), indexed for
-        retrieval, and returned only as a bounded excerpt — so a large file
-        informs later turns through RAG instead of flooding this one.
-        """
-        self.mcp_calls += 1
-        result = self._mcp.call(name, arguments)
-        if result.errored:
-            return result.text
-        if not result.file_text:
-            self._seen_terms.update(result.terms)
-            return result.text
 
-        self._on_progress(f"Screening {result.source}…")
-        verdict = self._guard.check_document(result.file_text, kind="code")
-        if not should_ingest(verdict):
-            reason = verdict.reason or "the safety scan could not complete"
-            self._on_warning(result.source, "github file blocked", reason)
-            return (
-                "error: that file was withheld by a safety screen; tell the "
-                "candidate you could not read it and ask about another file"
-            )
+def _web_research_tool(researcher, cache):
+    """The web-research tool: reports a digest, admits nothing itself."""
+    spec = web_research_spec()
 
-        self._seen_terms.update(result.terms)
-        self._code_corpus.append(result.file_text)
-        self.files_read.append(result.source)
-        doc = IngestedDocument(
-            name=result.source, doc_type="github", text=result.file_text
-        )
-        try:
-            self._index.add_document(doc)
-        except Exception as exc:
-            # Indexing is the durability half; the excerpt below still works.
-            self._on_warning(doc.name, "error", str(exc))
-        else:
-            self._on_document(doc)
-
-        excerpt = result.file_text[:GITHUB_FILE_INLINE_CHARS]
-        note = ""
-        if len(result.file_text) > GITHUB_FILE_INLINE_CHARS:
-            note = (
-                f"\n\n[Truncated at {GITHUB_FILE_INLINE_CHARS} of "
-                f"{len(result.file_text)} characters. The whole file is "
-                "indexed — ask about the rest and it will reach you through "
-                "your retrieved context on the next turn.]"
-            )
-        return f"{result.source} (real contents, read just now):\n{excerpt}{note}"
-
-    def _web_research(self, query, topic="other"):
+    def call(query, topic, runtime: ToolRuntime):
         # Type-check before touching str methods: JSON-valid arguments can
-        # still be the wrong type (e.g. a number), and an AttributeError here
-        # would escape run()'s TypeError net and kill the turn.
+        # still be the wrong type, and an AttributeError here would surface as
+        # a tool failure rather than something the model can correct.
         if not isinstance(query, str) or not query.strip():
-            return "error: query must be a non-empty string"
+            return PENDING_SCREEN, ToolOutcome.own_output(
+                "error: query must be a non-empty string"
+            )
         query = query.strip()
         if topic not in WEB_TOPICS:
             topic = "other"
 
-        cached = self._cache.get(query.lower())
+        cached = cache.get(query.lower())
         if cached is not None:
-            return cached
+            # Screened when it was first fetched; re-screening would bill a
+            # second scan for text already admitted this session.
+            return PENDING_SCREEN, ToolOutcome.own_output(cached)
 
-        self._on_progress(f"Researching the web: {query}…")
-        result = self._researcher.research(query)
-        if result.errored:
-            self._on_warning(
-                query,
-                "web research",
-                result.error_reason or "the search request failed",
+        runtime.stream_writer({"progress": f"Researching the web: {query}…"})
+        try:
+            result = researcher.research(query)
+        except OverBudget as exc:
+            # Caught here rather than left to ToolRetryMiddleware, which would
+            # retry a *hard* refusal twice and then tell the model the lookup
+            # failed because of "a fault in the interview app" (R22.8). It is
+            # not a fault and it will not succeed on retry — the cap is the
+            # answer, not a transient. This is the guardrail's fail-open
+            # wearing a different costume: a refusal reaching a generic
+            # handler and coming back out as a degraded answer.
+            #
+            # The turn itself continues. The cap was cleared when the turn
+            # started; what ran out is the budget for an *extra* paid
+            # sub-completion, and R22.7 accepts the turn in flight.
+            return PENDING_SCREEN, ToolOutcome.own_output(
+                "error: web research was refused because the spend limit for "
+                "this account has been reached. Do not retry it. Tell the "
+                "candidate plainly that you could not search the web, and "
+                "continue the interview without it.",
+                warning=(query, "budget", str(exc)),
             )
-            return "error: web research is unavailable right now"
-        if result.cost:
-            self.extra_cost += result.cost
+        if result.errored:
+            return PENDING_SCREEN, ToolOutcome.own_output(
+                "error: web research is unavailable right now",
+                warning=(
+                    query,
+                    "web research",
+                    result.error_reason or "the search request failed",
+                ),
+            )
 
-        # Fail CLOSED, like document ingestion and unlike the per-turn chat
-        # guardrail: web content reaches the interviewer only after a
-        # successful, clean scan of the digest.
-        self._on_progress("Screening the research results…")
-        verdict = self._guard.check_document(result.bullets, kind="web")
-        if not should_ingest(verdict):
-            reason = verdict.reason or "the safety scan could not complete"
-            self._on_warning(query, "web research blocked", reason)
-            return (
+        document = (
+            IngestedDocument(
+                name=f"web: {query[:60]}",
+                doc_type="web search",
+                text=result.raw_text,
+                topic=topic,
+            )
+            if result.raw_text
+            else None
+        )
+        return PENDING_SCREEN, ToolOutcome(
+            inline=result.bullets,
+            document=document,
+            kind="web",
+            label=query,
+            blocked_as="web research blocked",
+            document_blocked_as="web research not indexed",
+            blocked_message=(
                 "error: the research results were withheld by a safety screen; "
                 "tell the candidate web research is unavailable for this query"
-            )
+            ),
+            # The sub-completion ran and was billed whatever the screen decides.
+            billed_cost=result.cost or 0.0,
+            # Sources reach the panel only if the digest itself is admitted.
+            state_update={"citations": list(result.citations)},
+            on_admitted=lambda: cache.__setitem__(query.lower(), result.bullets),
+        )
 
-        self.citations.extend(result.citations)
+    return StructuredTool(
+        name=spec["name"],
+        description=spec["description"],
+        args_schema=spec["parameters"],
+        func=call,
+        response_format="content_and_artifact",
+    )
 
-        # Tier two: index the verbatim excerpts so later turns can retrieve
-        # fuller detail without a new search. Its own fail-closed scan; failure
-        # degrades to bullets-only (which already passed their scan).
-        if result.raw_text:
-            self._on_progress("Indexing the research for later retrieval…")
-            raw_verdict = self._guard.check_document(result.raw_text, kind="web")
-            if should_ingest(raw_verdict):
-                doc = IngestedDocument(
-                    name=f"web: {query[:60]}",
-                    doc_type="web search",
-                    text=result.raw_text,
-                    topic=topic,
-                )
-                try:
-                    self._index.add_document(doc)
-                except Exception as exc:
-                    self._on_warning(doc.name, "error", str(exc))
-                else:
-                    self._on_document(doc)
-            else:
-                self._on_warning(
-                    f"web: {query[:60]}",
-                    "web research not indexed",
-                    raw_verdict.reason or "the safety scan could not complete",
-                )
 
-        self._cache[query.lower()] = result.bullets
-        return result.bullets
+def _mcp_tools(mcp):
+    """One LangChain tool per discovered MCP tool.
 
-    def _record_evaluation(self, question, question_type, scores, verbal_feedback):
-        """Validate and hand one evaluation card to the caller.
+    This adapter earns its keep, unlike the dispatcher it replaced: these tools
+    do not exist until ``tools/list`` has run, and their schemas are the
+    server's, not ours. Each wrapper does nothing but relay and describe —
+    a file body becomes a document for the policy to admit, and a listing goes
+    inline but is still screened, since a repository the candidate does not
+    control can put an instruction in a file *name*.
+    """
+    return [_one_mcp_tool(mcp, spec["function"]) for spec in mcp.specs]
 
-        The schema already constrains everything, but providers enforce JSON
-        Schema unevenly — re-validate here so a malformed card comes back to
-        the model as an error string it can correct, instead of poisoning the
-        Evaluations tab with unusable data.
-        """
-        # Type-check before str methods (see _web_research) — JSON-valid
-        # arguments can still be the wrong type.
-        if not isinstance(question, str) or not question.strip():
-            return "error: question must be a non-empty string"
-        question = question.strip()
-        if not isinstance(verbal_feedback, str):
-            return "error: verbal_feedback must be a string"
-        if question_type not in QUESTION_TYPES:
-            question_type = "other"
-        if not isinstance(scores, dict):
-            return "error: scores must be an object of dimension -> integer"
-        missing = [d for d in EVALUATION_DIMENSIONS if d not in scores]
-        if missing:
-            return f"error: scores is missing dimensions: {', '.join(missing)}"
-        clean_scores = {}
-        for dimension in EVALUATION_DIMENSIONS:
-            value = scores[dimension]
-            # Accept integral floats (4.0): JSON Schema's "integer" does, so
-            # rejecting them here would fail a schema-conforming call — and
-            # models retry such rejections verbatim until the hops run out.
-            if isinstance(value, float) and value.is_integer():
-                value = int(value)
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or not EVALUATION_SCORE_MIN <= value <= EVALUATION_SCORE_MAX
-            ):
-                return (
-                    f"error: score for {dimension!r} must be an integer "
-                    f"between {EVALUATION_SCORE_MIN} and {EVALUATION_SCORE_MAX}"
-                )
-            clean_scores[dimension] = value
-        card = {
-            "question": question,
-            "question_type": question_type,
-            "scores": clean_scores,
-            "verbal_feedback": verbal_feedback.strip(),
-        }
-        # A repeat call for the SAME question is a correction and replaces
-        # that card; a different question is a second scored answer (the user
-        # answered more than one question in a message) and appends.
-        replaced = any(c["question"] == question for c in self.evaluations)
-        self.evaluations[:] = [
-            c for c in self.evaluations if c["question"] != question
-        ] + [card]
-        if replaced:
-            return "evaluation recorded (replaced your previous card for this question)"
-        return "evaluation recorded"
+
+def _one_mcp_tool(mcp, function):
+    """One relaying tool. A function, so each closes over its own name."""
+    name = function["name"]
+
+    def call(runtime: ToolRuntime, **arguments):
+        runtime.stream_writer({"progress": f"Checking GitHub: {name}…"})
+        # Deliberately NOT wrapped: a transport failure has to reach
+        # ToolRetryMiddleware to be retried, and catching it here made a
+        # transient blip permanent (one attempt instead of three). The
+        # never-raise contract is kept by that middleware's on_failure, not by
+        # this function.
+        return PENDING_SCREEN, _describe_mcp_result(mcp.call(name, arguments), name)
+
+    return StructuredTool(
+        name=name,
+        description=function.get("description", ""),
+        # The server's JSON Schema, forwarded unchanged.
+        args_schema=function.get("parameters")
+        or {"type": "object", "properties": {}},
+        func=call,
+        response_format="content_and_artifact",
+    )
+
+
+def _describe_mcp_result(result, name):
+    """Say what one relayed result *is*; the policy decides what happens to it."""
+    if result.errored:
+        # The server's own error message, relayed — our text, not a repo's.
+        return ToolOutcome.own_output(result.text)
+    if not result.file_text:
+        return ToolOutcome(
+            inline=result.text,
+            kind="code",
+            label=result.source or name,
+            blocked_as="github listing blocked",
+            blocked_message=(
+                "error: that listing was withheld by a safety screen; tell "
+                "the candidate you could not browse it and ask them to name "
+                "a file"
+            ),
+            terms=tuple(result.terms),
+        )
+    # inline=None: the model's excerpt will be a slice of this document, so one
+    # scan governs both and failing it withholds everything.
+    return ToolOutcome(
+        document=IngestedDocument(
+            name=result.source, doc_type="github", text=result.file_text
+        ),
+        kind="code",
+        label=result.source,
+        blocked_as="github file blocked",
+        blocked_message=(
+            "error: that file was withheld by a safety screen; tell the "
+            "candidate you could not read it and ask about another file"
+        ),
+        terms=tuple(result.terms),
+    )
+
+
+def build_tools(researcher, cache, mcp=None):
+    """Every tool the interviewer gets this turn, as LangChain tools.
+
+    Dependencies are closed over rather than passed through
+    ``create_agent(context_schema=...)``: the agent is rebuilt each turn, so
+    context would add a schema without removing a closure — the MCP tools have
+    to close over their client either way, since they do not exist until
+    discovery has run.
+    """
+    tools = [_web_research_tool(researcher, cache), _record_evaluation_tool()]
+    if mcp is None:
+        return tools
+    # A remote tool shadowing a local name would make the model's choice
+    # ambiguous; the local tool wins, as it did under the dispatcher.
+    local_names = {tool.name for tool in tools}
+    return tools + [t for t in _mcp_tools(mcp) if t.name not in local_names]

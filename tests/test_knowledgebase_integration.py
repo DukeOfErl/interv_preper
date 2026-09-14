@@ -15,8 +15,21 @@ import os
 import pytest
 
 from interview_prep.config import DEFAULT_EMBEDDING_MODEL, KNOWLEDGEBASE_DIR
+from interview_prep.authorization import authorize
+from interview_prep.spend import UNCAPPED
 from interview_prep.knowledgebase import KnowledgeBase
 from interview_prep.retrieval import format_context_block
+
+# These tests spend real credit against a live model, so they must declare an
+# authorized identity in as many words (R21.11) — exactly like every other
+# caller of a paid client. They are the clearest case for the guard: an
+# integration test IS a fourth caller, reaching the operation without the page.
+INTEGRATION_IDENTITY = authorize(
+    "integration-tests@example.com",
+    table={"integration-tests@example.com": "dev"},
+    email_verified=True,
+)
+
 
 pytestmark = pytest.mark.integration
 
@@ -29,7 +42,13 @@ requires_key = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def kb(tmp_path_factory):
     kb = KnowledgeBase(
-        db_path=tmp_path_factory.mktemp("kb") / "knowledgebase.db", api_key=API_KEY
+        identity=INTEGRATION_IDENTITY,
+        db_path=tmp_path_factory.mktemp("kb") / "knowledgebase.db",
+        api_key=API_KEY,
+        # This suite measures retrieval quality against the real API; nothing
+        # is counting its spend, and since R22.5's fix that has to be said
+        # rather than defaulted (`spend.resolve_budget`).
+        budget=UNCAPPED,
     )
     kb.sync(KNOWLEDGEBASE_DIR, DEFAULT_EMBEDDING_MODEL)
     yield kb
