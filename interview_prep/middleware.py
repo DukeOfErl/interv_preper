@@ -36,6 +36,7 @@ from typing_extensions import NotRequired
 
 from .config import MAX_TOOL_HOPS
 from .policy import ToolOutcome
+from .spend import OverBudget
 
 # The loop offers tools on every hop but the last; the limit middleware counts
 # calls rather than hops, so this is the budget in the units it uses.
@@ -193,7 +194,18 @@ def content_policy_middleware(
         if outcome.billed_cost:
             counters["extra_cost"] = outcome.billed_cost
 
-        text, admitted = policy.apply(outcome)
+        # `apply` can raise: screening a fetched document bills, and indexing
+        # re-raises a refusal rather than swallowing it. When it does, this
+        # function never returns its `Command`, so `counters` — including the
+        # cost of a sub-completion that has *already* been charged — never
+        # reaches graph state, and the page shows a refused turn as free. The
+        # ledger is unaffected (every client records its own); this carries the
+        # figure out so the sidebar can still show it.
+        try:
+            text, admitted = policy.apply(outcome)
+        except OverBudget as exc:
+            exc.billed_extra = float(counters.get("extra_cost") or 0.0)
+            raise
         message = ToolMessage(
             content=text,
             tool_call_id=request.tool_call["id"],

@@ -32,6 +32,8 @@ from langchain_openai import ChatOpenAI
 # agent they were refused by.
 from .authorization import Identity, Unauthorized, require_authorized  # noqa: F401
 from .config import OPENROUTER_BASE_URL, TYPING_DELAY_SECONDS
+from .context import estimate_prompt_tokens, estimate_text_tokens
+from .pricing import billing, price_of, turn_cost
 from .middleware import (
     TOOL_CALL_BUDGET,
     InterviewState,
@@ -39,6 +41,7 @@ from .middleware import (
     catch_typed_tool_call,
     content_policy_middleware,
 )
+from .spend import UNCAPPED, resolve_budget
 
 
 def tool_failure_message(exc):
@@ -69,14 +72,26 @@ class InterviewAgent:
         typing_delay=TYPING_DELAY_SECONDS,
         chat_model=None,
         identity=None,
+        budget=None,
     ):
         self.model = model
+        # Kept for the R22.3 pricing ladder below, which needs the catalog when
+        # OpenRouter reports no cost for a turn.
+        self._api_key = api_key
         # The proof of authorization (R21.13). Kept as given rather than
         # coerced: `stream_reply` refuses anything that is not an `Identity`
         # saying it is authorized, so a truthy stand-in cannot be mistaken for
         # one. Defaults to None so a caller that never heard of authorization
         # fails closed instead of spending.
         self.identity = identity
+        # Like the identity, and refused in the same place: the turn, not the
+        # construction (R22.5). A real model with no budget named is refused
+        # outright rather than silently uncapped — see `resolve_budget`: the
+        # arming must not be the caller's to forget. An injected model spends
+        # nothing, so a test needs no budget.
+        if chat_model is None:
+            budget = resolve_budget(budget, "this turn")
+        self.budget = budget or UNCAPPED
         self.reasoning_effort = reasoning_effort
         self.typing_delay = typing_delay
         extra_body = {"usage": {"include": True}}
@@ -98,9 +113,28 @@ class InterviewAgent:
     def _reset(self):
         self.last_usage = None
         self.last_cost = None
+        #: Tokens from hops that billed but reported no cost of their own.
+        #: A turn is one model call per hop and each bills separately, so a
+        #: turn where *some* hops report a cost and others do not is the
+        #: under-counting case: taking `last_cost` alone silently prices the
+        #: rest at nothing. Kept apart from `last_usage`, which holds only the
+        #: final hop, so these can be priced and added rather than replaced.
+        self._unpriced_prompt_tokens = 0
+        self._unpriced_completion_tokens = 0
+        #: What this turn cost, down R22.3's ladder — the figure recorded
+        #: against the ledger and displayed by the page. None until a turn ends.
+        self.turn_cost_usd = None
         self.last_reasoning_tokens = None
         self.last_tool_calls = []
         self.answer_text = ""
+        #: Every token this turn actually streamed, preambles included.
+        #: `answer_text` is taken from the graph's final state, which a turn
+        #: the guardrail blocks never reaches — so rung three priced an
+        #: abandoned turn's output at `estimate_text_tokens("")`, i.e. zero,
+        #: for output the provider had already billed. This is the residual
+        #: half of R22.4: the input side was fixed, the output side still read
+        #: as free.
+        self._streamed_text = ""
         self.answered = False
         self.final_state = {}
 
@@ -160,6 +194,11 @@ class InterviewAgent:
         caller that iterates is actually checked.
         """
         self._require_authorized()
+        # Money before tokens: the cap is checked once per turn, against the
+        # next-prompt estimate the caller put in the budget (R22.6), and here
+        # rather than in the page because `evals/` and `tests/` reach this
+        # method without passing through `chat_bot.py`.
+        self.budget.require(self.identity)
         return self._stream_reply(
             system_prompt,
             messages,
@@ -202,28 +241,104 @@ class InterviewAgent:
             {"role": m["role"], "content": m["content"]} for m in messages
         ]
 
-        for mode, chunk in agent.stream(
-            {"messages": conversation},
-            stream_mode=["messages", "custom", "values"],
-        ):
-            if mode == "custom":
-                if on_progress and isinstance(chunk, dict) and "progress" in chunk:
-                    on_progress(chunk["progress"])
-                continue
-            if mode == "values":
-                self.final_state = chunk
-                continue
-            message, _meta = chunk
-            if not isinstance(message, AIMessage):
-                continue
-            self._record_usage(message)
-            text = message.text
-            if text:
-                yield text
+        # `finally`, not a trailing statement, and this is the whole of R22.4
+        # for the biggest number in the turn. The page `break`s out of this
+        # generator the moment the guardrail returns a jailbreak verdict
+        # (chat_bot polls the future between tokens), and an APIError mid-hop
+        # propagates through this frame — in both cases a trailing statement is
+        # skipped while the hops that already ran have been billed. Abandoning
+        # the generator drops its refcount, `close()` raises `GeneratorExit` at
+        # the `yield`, and a `finally` still runs. Measured before the fix:
+        # $0.42 spent, $0.00 recorded.
+        #
+        # What that means for *when* the accrual lands: on generator
+        # finalisation. For the page that is immediate — its `for` loop holds
+        # the only reference and drops it on the `break` — but a caller that
+        # keeps the generator in a variable defers the recording until that
+        # variable does. Nothing in this app does; a future driver that did
+        # would see the spend recorded late, not lost.
+        try:
+            for mode, chunk in agent.stream(
+                {"messages": conversation},
+                stream_mode=["messages", "custom", "values"],
+            ):
+                if mode == "custom":
+                    if on_progress and isinstance(chunk, dict) and "progress" in chunk:
+                        on_progress(chunk["progress"])
+                    continue
+                if mode == "values":
+                    self.final_state = chunk
+                    continue
+                message, _meta = chunk
+                if not isinstance(message, AIMessage):
+                    continue
+                self._record_usage(message)
+                text = message.text
+                if text:
+                    # Accumulated before the yield, not after: the consumer may
+                    # abandon the generator at this exact point (the page polls
+                    # the guardrail between tokens), and text already streamed
+                    # has already been paid for.
+                    self._streamed_text += text
+                    yield text
+        finally:
+            self._finish(system_prompt, messages)
 
-        self._finish()
+    def _turn_cost(self, system_prompt, messages):
+        """This turn's cost, down R22.3's ladder: actual, reported, estimated.
 
-    def _finish(self):
+        The whole ladder lives here rather than half here and half in the page,
+        because only this object is reachable from every exit path — a turn the
+        guardrail blocks never returns to the page's accounting at all, and a
+        turn OpenRouter reported no cost for would then record nothing.
+
+        The catalog lookup is skipped when nothing is counting: it is a network
+        round trip, and dozens of tests drive this agent with a scripted model
+        that never spends a cent.
+        """
+        unpriced = self._unpriced_prompt_tokens or self._unpriced_completion_tokens
+        if self.last_cost is not None and not unpriced:
+            return self.last_cost
+        if not self.budget.counts:
+            return self.last_cost
+        pricing = price_of(self.model, self._api_key)
+        if self.last_cost is not None:
+            # Some hops reported, some did not. Charge what was reported and
+            # price the rest from their own tokens (R22.3's second rung),
+            # rather than letting the reported figure stand for the whole turn.
+            return self.last_cost + turn_cost(
+                pricing,
+                self._unpriced_prompt_tokens,
+                self._unpriced_completion_tokens,
+            )
+        if unpriced:
+            # No hop reported a cost, so every hop's tokens are in here. Not
+            # `last_usage`, which `_record_usage` *replaces* per hop and which
+            # therefore describes only the final one — a three-hop tool turn
+            # priced from it is billed for a third of itself. The mixed case
+            # returned above; this is the all-silent one, and it is the common
+            # shape when `extra_body={"usage": …}` is dropped or a provider
+            # simply omits cost.
+            return turn_cost(
+                pricing,
+                self._unpriced_prompt_tokens,
+                self._unpriced_completion_tokens,
+            )
+        if self.last_usage is not None:
+            return turn_cost(
+                pricing,
+                self.last_usage.prompt_tokens or 0,
+                self.last_usage.completion_tokens or 0,
+            )
+        return turn_cost(
+            pricing,
+            estimate_prompt_tokens(system_prompt, messages),
+            # What was streamed, not what was kept. A blocked turn stores no
+            # answer and still cost the provider every token it emitted.
+            estimate_text_tokens(self._streamed_text or self.answer_text),
+        )
+
+    def _finish(self, system_prompt="", messages=()):
         """Take the answer and the turn's bookkeeping from the final state.
 
         The reply is the last assistant message that asked for no tools —
@@ -231,15 +346,27 @@ class InterviewAgent:
         misbehaving model writes raw tool-call JSON, and must be streamed but
         never stored.
         """
-        messages = self.final_state.get("messages") or []
-        for message in reversed(messages):
+        state_messages = self.final_state.get("messages") or []
+        for message in reversed(state_messages):
             if isinstance(message, AIMessage) and not getattr(
                 message, "tool_calls", None
             ):
                 self.answer_text = message.text
                 self.answered = True
                 break
-        self.last_tool_calls = _tool_call_log(messages)
+        self.last_tool_calls = _tool_call_log(state_messages)
+        # Recorded by the operation that spent it, on every exit path. Tool
+        # sub-completions (`extra_cost`) are deliberately not added: the web
+        # researcher records its own, and adding it twice would cap everyone at
+        # half their budget.
+        #
+        # Guarded, and here more than anywhere: this runs in a `finally`, so an
+        # exception raised while pricing the turn would replace whatever was
+        # already propagating — including the `GeneratorExit` that a blocked
+        # turn abandons the stream with.
+        with billing(self.model):
+            self.turn_cost_usd = self._turn_cost(system_prompt, messages)
+            self.budget.record(self.identity, self.turn_cost_usd or 0.0)
 
     def _record_usage(self, chunk):
         """Accumulate spend across hops, as every hop bills separately."""
@@ -260,6 +387,15 @@ class InterviewAgent:
         cost = token_usage.get("cost")
         if cost is not None:
             self.last_cost = (self.last_cost or 0.0) + cost
+        elif usage:
+            # This hop billed and said nothing about what it cost. Its tokens
+            # are remembered separately so `_turn_cost` can price them and add
+            # them to the hops that did report — rather than the ladder seeing
+            # a non-None `last_cost` and stopping on the first rung, which
+            # charges a multi-hop turn for whichever hops happened to be
+            # chatty about their billing.
+            self._unpriced_prompt_tokens += usage.get("input_tokens") or 0
+            self._unpriced_completion_tokens += usage.get("output_tokens") or 0
 
     @property
     def extra_cost(self):

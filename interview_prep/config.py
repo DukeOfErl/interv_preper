@@ -13,6 +13,15 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "GPT-5-Mini"
+
+#: Output tokens a first interviewer turn is assumed to produce, used only to
+#: price the spend check before anything has been measured (R10.6 makes the
+#: next-prompt estimate "N/A" until one exchange completes). Sized to a long
+#: turn — a question plus scored feedback — because over-estimating costs one
+#: refusal a user can explain and under-estimating costs a turn that should
+#: not have run. The *input* side of that estimate is not assumed: it is the
+#: composed system prompt plus the history, counted exactly.
+ASSUMED_REPLY_TOKENS = 800
 TYPING_DELAY_SECONDS = 0.05
 MODELS_CACHE_TTL_SECONDS = 3600
 

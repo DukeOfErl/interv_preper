@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from .config import GITHUB_FILE_INLINE_CHARS
 from .ingest import IngestedDocument, should_ingest
+from .spend import OverBudget
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,15 @@ class ContentPolicy:
         """
         try:
             self._index.add_document(doc)
+        except OverBudget:
+            # Not swallowed into a warning. Indexing now spends (the embedding
+            # call), so this is a *refusal*, and turning a refusal into a
+            # "document error" plus a quietly smaller corpus is the silent
+            # downgrade R22.8 forbids — the same shape as the guardrail's
+            # fail-open. `grounding` re-raises it and `tools` handles it
+            # explicitly; this was the one place it leaked into the generic
+            # handler.
+            raise
         except Exception as exc:
             self._on_warning(doc.name, "error", str(exc))
             return False

@@ -23,6 +23,8 @@ from .config import (
     QUERY_REWRITE_MODEL,
     QUERY_REWRITE_PROMPT_FILE,
 )
+from .pricing import bill_call
+from .spend import UNCAPPED, resolve_budget
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class QueryCondenser:
         base_url=OPENROUTER_BASE_URL,
         client=None,
         identity=None,
+        budget=None,
     ):
         self.model = model
         self.instructions = (
@@ -77,8 +80,23 @@ class QueryCondenser:
         # the *real* client is built: an injected fake spends nothing.
         if client is None:
             require_authorized(identity, f"{type(self).__name__}")
+            budget = resolve_budget(budget, f"{type(self).__name__}")
         # Allow an injected client (tests); otherwise build the real one.
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
+        self._api_key = api_key
+        self._identity = identity
+        self.budget = budget or UNCAPPED
+
+
+    def _bill(self, response, *texts):
+        """Record what this call cost (R22.2), down R22.3's ladder.
+
+        Never raises: billing is not part of the decision this class makes, and
+        `pricing.billing` says at length why that separation is load-bearing.
+        """
+        bill_call(
+            self.budget, self._identity, response, self.model, self._api_key, texts
+        )
 
     def condense(self, question, history) -> QueryRewrite:
         """Rewrite ``question`` into a standalone query using ``history`` context.
@@ -87,6 +105,8 @@ class QueryCondenser:
         original ``question`` flagged with ``errored=True`` so the caller can
         surface a warning while retrieval still proceeds on the raw text.
         """
+        self.budget.require(self._identity)
+        response = None
         conversation = _format_history(history)
         user_content = (
             f"Conversation so far:\n{conversation}\n\n"
@@ -101,10 +121,18 @@ class QueryCondenser:
                     {"role": "system", "content": self.instructions},
                     {"role": "user", "content": user_content},
                 ],
+                extra_body={"usage": {"include": True}},
             )
             rewritten = (response.choices[0].message.content or "").strip()
         except Exception:
             return QueryRewrite(question, errored=True)
+        finally:
+            # Outside the `try`, like the guardrail's and for the same reason:
+            # this one only falls open to the raw query rather than admitting a
+            # jailbreak, but a billing failure must not decide that either. In
+            # a `finally` because a rewrite that comes back blank still cost a
+            # call (R22.4).
+            self._bill(response, self.instructions, user_content)
         if not rewritten:
             return QueryRewrite(question, errored=True)
         return QueryRewrite(rewritten, errored=False)

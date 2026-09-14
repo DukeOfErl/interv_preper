@@ -20,6 +20,7 @@ from interview_prep.tools import (
     validate_evaluation_card,
     web_research_spec,
 )
+from interview_prep.spend import OverBudget
 
 DIMENSIONS = [
     "relevance",
@@ -204,3 +205,56 @@ def test_looks_like_feedback_is_conservative():
     assert not looks_like_feedback("I'll score you on relevance (1-5) shortly.")
     assert not looks_like_feedback("Your relevance averaged 4.2 across answers.")
     assert not looks_like_feedback("")
+
+
+# --- a cap refusal must not be retried into a degraded answer ---------------
+#
+# `web_research` runs inside the agent's tool loop, where `ToolRetryMiddleware`
+# wraps every tool. A cap refusal is an exception, so without this the
+# middleware retried a *hard* refusal (R22.8) twice and then told the model the
+# lookup had failed through "a fault in the interview app" — which it is not,
+# and which will not succeed on retry.
+#
+# It is the pre-send guardrail's fail-open in a different costume: a refusal
+# reaching a generic handler and coming back out as a degraded answer. Found by
+# review, in the one place two agents had both already been looking.
+
+
+class FakeRuntime:
+    """The tool runtime, reduced to the one method a tool actually calls."""
+
+    def __init__(self):
+        self.progress = []
+
+    def stream_writer(self, payload):
+        self.progress.append(payload)
+
+
+class RefusingResearcher:
+    """A researcher whose budget has run out."""
+
+    def research(self, query):
+        raise OverBudget("the spend limit for this account has been reached")
+
+
+def test_a_cap_refusal_inside_web_research_is_reported_not_raised():
+    tools = {t.name: t for t in build_tools(researcher=RefusingResearcher(), cache={})}
+    _, outcome = tools["web_research"].func(
+        runtime=FakeRuntime(), query="acme corp news", topic="company"
+    )
+    text = outcome.inline
+    assert "spend limit" in text
+    # The model must be told not to retry: the cap is the answer, not a blip.
+    assert "not retry" in text.lower()
+    # And it must not be blamed on the app, which is what the generic
+    # retry-exhausted wording would have said.
+    assert "fault in the interview app" not in text
+
+
+def test_a_cap_refusal_inside_web_research_warns_the_user():
+    tools = {t.name: t for t in build_tools(researcher=RefusingResearcher(), cache={})}
+    _, outcome = tools["web_research"].func(
+        runtime=FakeRuntime(), query="acme corp news", topic="company"
+    )
+    assert outcome.warning is not None
+    assert outcome.warning[1] == "budget"

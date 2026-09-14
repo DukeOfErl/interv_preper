@@ -36,6 +36,8 @@ from .config import (
     WEB_SEARCH_ENGINE,
     WEB_SEARCH_MAX_RESULTS,
 )
+from .pricing import bill_call, reported_cost
+from .spend import UNCAPPED, resolve_budget
 
 _MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\((\S+?)(?:\s+\"[^\"]*\")?\)")
 
@@ -140,17 +142,6 @@ def _format_raw_text(citations: list[Citation]) -> str:
     return "\n\n".join(sections)
 
 
-def _extract_cost(usage) -> float | None:
-    """OpenRouter's actual USD cost off the usage object (an SDK-extra field)."""
-    cost = getattr(usage, "cost", None)
-    if cost is None and getattr(usage, "model_extra", None):
-        cost = usage.model_extra.get("cost")
-    try:
-        return float(cost) if cost is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
 class WebResearcher:
     """One-shot web search + extraction over OpenRouter's web plugin."""
 
@@ -164,6 +155,7 @@ class WebResearcher:
         engine=WEB_SEARCH_ENGINE,
         max_results=WEB_SEARCH_MAX_RESULTS,
         identity=None,
+        budget=None,
     ):
         self.model = model
         self.engine = engine
@@ -178,7 +170,25 @@ class WebResearcher:
         # the *real* client is built: an injected fake spends nothing.
         if client is None:
             require_authorized(identity, "WebResearcher")
+            budget = resolve_budget(budget, "WebResearcher")
         self._client = client or OpenAI(base_url=base_url, api_key=api_key)
+        # The cap travels with the identity, and is checked where the money
+        # moves rather than where the object is built (R22.5): a researcher is
+        # constructed once per turn but a turn may research more than once.
+        self._api_key = api_key
+        self._identity = identity
+        self.budget = budget or UNCAPPED
+
+
+    def _bill(self, response, *texts):
+        """Record what this call cost (R22.2), down R22.3's ladder.
+
+        Never raises: billing is not part of the decision this class makes, and
+        `pricing.billing` says at length why that separation is load-bearing.
+        """
+        bill_call(
+            self.budget, self._identity, response, self.model, self._api_key, texts
+        )
 
     def research(self, query) -> ResearchResult:
         """Search the web for ``query`` and return the screened-ready digest.
@@ -187,6 +197,8 @@ class WebResearcher:
         the tool layer can hand the model a readable error string instead of
         aborting the turn.
         """
+        self.budget.require(self._identity)
+        response = None
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -211,11 +223,21 @@ class WebResearcher:
             message = response.choices[0].message
             bullets = (message.content or "").strip()
             citations = _parse_citations(message)
-            cost = _extract_cost(getattr(response, "usage", None))
+            # `cost` on the result stays the *reported* figure — the tool
+            # layer surfaces it as provenance and None means "not reported".
+            # What is billed is the ladder's answer, which may be an estimate.
+            cost = reported_cost(getattr(response, "usage", None))
         except Exception as exc:
             return ResearchResult(
                 errored=True, error_reason=f"{type(exc).__name__}: {exc}"
             )
+        finally:
+            # Billed here, not by the tool layer that reads `result.cost`: a
+            # search that produced no usable bullets still cost the operator a
+            # search (R22.4), and the caller is free to discard the result.
+            # Outside the `try`, so a billing failure cannot turn a successful
+            # search into "web research is unavailable".
+            self._bill(response, self.instructions, query)
         if not bullets:
             return ResearchResult(
                 errored=True,

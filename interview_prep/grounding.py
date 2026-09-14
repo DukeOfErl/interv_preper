@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from .config import QUERY_REWRITE_HISTORY_TURNS
 from .retrieval import fill_retrieved_context, format_context_block
+from .spend import OverBudget
 
 
 @dataclass(frozen=True)
@@ -77,14 +78,23 @@ def ground_turn(
 
         # Both retrievals fail open independently: answer with whatever
         # context could be fetched, but say so.
+        # `OverBudget` is deliberately outside the fail-open rule below, in
+        # both sources. A refusal for spend is not a flaky dependency: R22.8
+        # makes it hard, and degrading it into "retrieval failed" would tell
+        # the user an outage happened while quietly serving them a worse,
+        # ungrounded answer — the silent downgrade that requirement forbids.
         if not doc_index.is_empty:
             try:
                 retrieved += doc_index.retrieve(query)
+            except OverBudget:
+                raise
             except Exception as exc:
                 warn("", "retrieval", str(exc))
         if kb_ready:
             try:
                 retrieved += kb.retrieve(query, embedding_model)
+            except OverBudget:
+                raise
             except Exception as exc:
                 # Distinct kind: the "retrieval" copy talks about
                 # uploaded documents, which may not even exist on
