@@ -410,3 +410,42 @@ def test_an_unreadable_cap_is_worded_as_a_deployment_fault(monkeypatch):
     assert decision.reason == "ledger_unavailable", (
         "a misconfigured cap must not read as the user having overspent"
     )
+
+
+# --- an estimate that cannot be priced is unmeasured, never free ------------
+
+
+def test_a_pricing_outage_does_not_admit_a_user_who_is_nearly_out(offline, tmp_path):
+    """R22.21, and the hole it was written to close, reopened by a detail.
+
+    The `offline` fixture is exactly the outage: no network, catalog cache
+    cleared. `get_model_pricing` then reports zero rates, so
+    `turn_cost(pricing, …)` returns **0.0 rather than None** — and the fallback
+    that exists for an unmeasured estimate only fired on `None`. `decide` was
+    handed a projected cost of nothing, which fits inside any remaining budget,
+    so every turn was admitted and the cap silently degraded to "refuse once
+    already over" — precisely what R22.6 forbids.
+
+    The user here has a third of a cent left against a five dollar cap. A
+    correctly-priced turn costs more than that, and an unpriceable one must be
+    treated as costing *more*, not less.
+    """
+    write_secrets(tmp_path, {USER: "user"})
+    app = run_app(offline, USER, spent(USER, 4.9967))
+    assert len(app.get("chat_input")) == 0, (
+        "a turn was admitted on an estimate of $0.00 during a pricing outage"
+    )
+    assert "spend limit" in errors(app).lower()
+
+
+def test_a_pricing_outage_still_serves_a_user_with_room(offline, tmp_path):
+    """The other direction of the same rule, because a change to a classifier
+    moves records both ways and only the intended one gets looked at.
+
+    Falling back to the flat floor must not refuse someone who can plainly
+    afford it, or a catalog blip would lock out every account at once — which
+    is the failure the floor exists to avoid, not to cause.
+    """
+    write_secrets(tmp_path, {USER: "user"})
+    app = run_app(offline, USER, spent(USER, 0.10))
+    assert len(app.get("chat_input")) == 1

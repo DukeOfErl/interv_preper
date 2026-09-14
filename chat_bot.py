@@ -64,6 +64,7 @@ from interview_prep.authorization import ANONYMOUS, authorize
 from interview_prep.ledger_postgres import PostgresLedger
 from interview_prep.permissions import Permission, has
 from interview_prep.spend import (
+    UNMEASURED_TURN_USD,
     BufferedLedger,
     Budget,
     LedgerUnavailable,
@@ -184,9 +185,16 @@ def current_budget(estimate):
             # R22.13 exists to prevent, arriving by the back door.
             #
             # A `[spend]` block with no usable cap is as misconfigured as one
-            # with no usable connection string, so it takes the same path: the
-            # refusal is worded as the deployment fault it is, and still fails
-            # closed for everyone but `dev`, who can sign in and fix it.
+            # with no usable connection string, so it takes the same path and
+            # the refusal is worded as the deployment fault it is.
+            #
+            # This refuses `dev` too, deliberately and per R22.12:
+            # `check_budget` reads the store before it looks at the role, so an
+            # unreadable ledger stops the operator as well. That is the point —
+            # the one person who most needs to notice an outage is the one who
+            # can fix it — but it does mean a misconfigured `[spend]` block
+            # locks *everyone* out until secrets are corrected. Fixed by
+            # editing secrets, not by signing in.
             store = MissingLedger()
             cap = 0.0
     # Buffered: without it every paid client's guard is its own round trip and
@@ -235,6 +243,19 @@ def render_over_budget(decision) -> None:
             "is refusing to spend anything. **This is a deployment fault, not "
             "a problem with your account** — nothing you have done has used up "
             "a budget. Please tell the operator."
+        )
+        return
+    if getattr(decision, "reason", None) in {"unauthorized", "unarmed"}:
+        # Neither is a budget the user has exhausted. "Unauthorized" means no
+        # role at all, and "unarmed" means a paid client was built with no
+        # budget named — a wiring fault. Telling either of them they have
+        # reached their spend limit is, in `CapDecision`'s own words, a lie
+        # about a budget they do not have (R22.13).
+        st.error(
+            "⚠️ This app is refusing to spend on this request because it is "
+            "not correctly configured to account for it. **This is not a "
+            "limit you have reached** — nothing you have done has used up a "
+            "budget. Please tell the operator."
         )
         return
     st.error(
@@ -511,7 +532,11 @@ def sync_documents(api_key, container, identity, budget) -> DocumentIndex:
             # switch is abandoned rather than half-applied: the selector goes
             # back to the model whose index is still intact, and the user is
             # told why the model they picked did not take.
-            record_warning("embedding model", "budget", str(exc))
+            # Its own warning kind: the "budget" wording is written for a
+            # file ("… was not added. You can upload it again"), and telling
+            # someone who switched a dropdown to re-upload something they never
+            # uploaded is a message about a different event.
+            record_warning(embedding_model, "budget model switch", str(exc))
             if previous is not None:
                 st.session_state["embedding_model"] = previous.embedding_model
                 index = previous
@@ -625,11 +650,15 @@ def sync_knowledgebase(api_key, identity, budget):
                 identity=identity,
                 budget=budget,
             )
+        # Stored before the sync, not after. `KnowledgeBase.__init__` opens a
+        # SQLite connection, and the `OverBudget` path below is deliberately
+        # un-latched — so dropping the object on a refusal meant every
+        # subsequent rerun built another one and leaked another connection.
+        st.session_state["knowledgebase"] = kb
         if st.session_state.get("kb_synced_model") != model:
             with st.spinner("Syncing the knowledge base…"):
                 kb.sync(KNOWLEDGEBASE_DIR, model)
             st.session_state["kb_synced_model"] = model
-        st.session_state["knowledgebase"] = kb
         # Same reason as the document index: opened once per session, so the
         # current turn's budget has to be handed to it on every run.
         kb.budget = budget
@@ -791,7 +820,20 @@ def _run() -> None:
     # Decided against the *next-prompt estimate*, not against the total, so the
     # turn that would cross the cap is the one refused (R22.6).
     estimate = spend.next_estimate
-    if estimate is None and pricing.is_known:
+    if not pricing.is_known:
+        # The catalog is unreachable, so `turn_cost` priced every token at zero
+        # and `spend.next_estimate` is **0.0 rather than None** from turn two
+        # onward — which slipped past the `is None` test below and made
+        # `decide` compare a projected cost of nothing against any remaining
+        # budget. Every turn is then admitted, and the cap silently degrades to
+        # "refuse once already over", which is precisely what R22.6 forbids.
+        #
+        # R22.21 names the rule: an estimate that cannot be priced is
+        # *unmeasured*, not free, and falls to the flat floor. Set explicitly
+        # rather than left as None so the sidebar shows the figure the cap was
+        # actually decided against (R22.22).
+        estimate = UNMEASURED_TURN_USD
+    elif estimate is None:
         # R10.6: nothing has been measured yet, which is true of the first turn
         # of *every* session while the ledger's total is a lifetime one. Rather
         # than fall back to the policy's flat floor, price what is actually
@@ -1069,6 +1111,13 @@ def _run() -> None:
                     # spent the rest in between (R22.7's one-turn window).
                     slot.empty()
                     stream_failed = True
+                    # A tool sub-completion may have billed before screening
+                    # tripped the cap. Its cost never reached graph state, so
+                    # `llm.extra_cost` reads zero below; carried on the
+                    # exception instead so the turn is not shown as free.
+                    st.session_state["total_cost"] += getattr(
+                        exc, "billed_extra", 0.0
+                    )
                     render_over_budget(exc.decision)
                 except AuthenticationError:
                     slot.empty()

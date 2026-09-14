@@ -99,8 +99,13 @@ class DocumentIndex:
             }
             for i in range(len(chunks))
         ]
-        ids = self._store.add_texts(chunks, metadatas=metadatas)
-        self._bill(chunks)
+        # Billed from a `finally`, matching every LLM client here (R22.4): the
+        # provider charges for the embedding request it served, whether or not
+        # this process manages to parse or store what came back.
+        try:
+            ids = self._store.add_texts(chunks, metadatas=metadatas)
+        finally:
+            self._bill(chunks)
         self._ids_by_doc[doc.name] = list(ids)
         doc.n_chunks = len(chunks)
         return len(chunks)

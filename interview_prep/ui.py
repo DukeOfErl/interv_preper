@@ -151,6 +151,21 @@ def warning_message(entry) -> str:
         return f"**{entry['name']}** was rejected by the safety scan" + (
             f": {entry['reason']}" if entry["reason"] else "."
         )
+    if entry["kind"] == "budget model switch":
+        # Its own wording because the event is not a document. Switching the
+        # embedding model re-embeds the whole corpus (R15.5), and a refusal
+        # partway leaves an index holding some documents and not others — so
+        # the switch is abandoned and the previous model kept. The "budget"
+        # message below tells the user to upload the thing again, which for a
+        # dropdown is advice about something they never did.
+        return (
+            f"The embedding model could not be changed to **{entry['name']}**, "
+            "because the app is refusing to spend on re-embedding your "
+            "documents right now"
+            + (f": {entry['reason']}" if entry["reason"] else ".")
+            + " Your documents are unchanged and still searchable with the "
+            "previous model."
+        )
     if entry["kind"] == "budget":
         # Deliberately does NOT say "nothing was charged", which an earlier
         # version did. Screening runs before the decision to index and costs
