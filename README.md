@@ -6,7 +6,11 @@ A basic mock-interview chatbot. Upload your resume and a job ad, and it runs an 
 
 The interviewing itself is straightforward. The part of this project worth reading is what sits behind it — sign-in and an allowlist, a per-identity spend cap backed by Postgres, fail-closed screening of everything the model is shown, and a test suite written on the assumption that controls lie about working.
 
-<!-- Add the live app URL here once deployed. -->
+**Live app: <https://interv-preper.streamlit.app/>**
+
+**Access is by invitation, and that is the point.** Every turn spends my own OpenRouter credit, so signing in with Google proves who you are but does not get you in — your address also has to be on the operator's allowlist. Ask me and I will add you.
+
+If you sign in without being on it, you will be told plainly that your account is not authorized and shown the address you signed in as. That refusal is the feature, not a fault: see [Three questions before a model call](#three-questions-before-a-model-call).
 
 ## What a session looks like
 
