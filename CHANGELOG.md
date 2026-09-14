@@ -10,6 +10,24 @@ any release; `1.0.0` when it stabilizes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-14
+
+The version where the app stopped serving anyone who found the URL, and
+stopped spending without a ceiling. Three questions now stand between a visitor
+and a model call — who are you, may you be here, and how much may you spend —
+and each is answered by a separate module, because they fail in different
+directions and collapsing them would make "nobody signed in" and "signed in
+with a small budget" the same state.
+
+The theme of the work underneath is narrower than the feature: **a control that
+reports success without holding is worse than no control.** Four of the six
+paid clients were spending the operator's credit and reporting none of it; a
+cap fed by the other two would have looked healthy and counted a third of the
+bill. The same shape turned up in a guard that was present and never reached, a
+retry that was tested on an object whose wiring discarded it, and a column
+precision that rounded the smallest charges to zero after the code had been
+fixed to record them.
+
 ### Added
 - **A per-identity spend cap.** Each authorized address has a lifetime USD
   budget, held in an external Postgres and read before every turn; the turn is
